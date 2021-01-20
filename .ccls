@@ -1,0 +1,6 @@
+clang
+%c -std=c11
+%h
+-Isrc
+-Ilib
+-Itests

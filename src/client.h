@@ -7,19 +7,6 @@
 
 #define INPUT_BUF_SIZE 2048
 
-typedef struct ActionFlags_st {
-    union {
-        struct {
-            unsigned char task : 1;
-            unsigned char workspace : 1;
-            unsigned char run : 1;
-            unsigned char get : 1;
-            unsigned char unused : 4;
-        };
-        char flag_value;
-    };
-} ActionFlags;
-
 /*****************************************************
  * NETWORK & IO
  ****************************************************/
@@ -67,37 +54,21 @@ client_eval_cmds(char** argv,
                  int cmd_count,
                  ProtocolTokenStream* msg)
 {
-    if (cmd_count < 2) return -1;
+    if (cmd_count < 1) return -1;
 
-    ActionFlags flags = {0};
     for (int i = 0; i < 2; i++) {
         char* cmd = argv[cmd_indices[i]];
-        if (is_cmd(cmd, (char*[]){"task", "t"}, 2))
-            flags.task = 1;
-        if (is_cmd(cmd, (char*[]){"workspace", "ws"}, 2))
-            flags.workspace = 1;
-        if (is_cmd(cmd, (char*[]){"run", "r", "start", "s", "use", "u"}, 6))
-            flags.run = 1;
-        if (is_cmd(cmd, (char*[]){"get", "g"}, 2))
-            flags.get = 1;
+        if (is_cmd(cmd, (char*[]){"task", "t"}, 2)) msg->type = PROTOCOL_MSG_TASK_INVOKE;
+        else if (is_cmd(cmd, (char*[]){"workspace", "ws", "w"}, 3)) msg->type = PROTOCOL_MSG_WORKSPACE_USE;
+        else if (is_cmd(cmd, (char*[]){"get", "g"}, 2)) {
+            msg->type = cmd_count > 1 ? PROTOCOL_MSG_TASK_GET : PROTOCOL_MSG_WORKSPACE_GET;
+        }
     }
 
-    msg->length = cmd_count - 2;
-    switch (flags.flag_value) {
-        // TASK GET
-        case 0b00001001: msg->type = PROTOCOL_MSG_TASK_GET; break;
-        // TASK RUN
-        case 0b00000101: msg->type = PROTOCOL_MSG_TASK_INVOKE; break;
-        // WORKSPACE GET
-        case 0b00001010: msg->type = PROTOCOL_MSG_WORKSPACE_GET; break;
-        // WORKSPACE RUN/USE
-        case 0b00000110: msg->type = PROTOCOL_MSG_WORKSPACE_USE; break;
-        // INVALID
-        default: break;
-    }
+    msg->length = cmd_count - 1;
 
     int token_idx = 0;
-    for (int i = 2; i < cmd_count; i++) {
+    for (int i = 1; i < cmd_count; i++) {
         char* cmd = argv[cmd_indices[i]];
         if(cmd == NULL) break;
 

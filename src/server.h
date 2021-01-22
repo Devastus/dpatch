@@ -48,10 +48,13 @@ typedef struct Task_st {
 typedef struct TaskProcess_st {
     pid_t pid;
     char* task_name;
+    int out_fd_r;
+    int err_fd_r;
 } TaskProcess;
 
 typedef struct ClientPacket_st {
     int socket;
+    int client;
     int len;
     char* data;
 } ClientPacket;
@@ -63,17 +66,14 @@ typedef struct Server_st {
     ProtocolTokenStream* token_stream;
     Stack* client_stack;
     Stack* process_stack;
-    Stack* packet_stack;
     Stack* task_stack;
-    int* out_fd;
-    int* err_fd;
 } Server;
 
 /*****************************************************
  * NETWORK & IO
  ****************************************************/
 
-static inline int
+static int
 server_send(Server* server,
             ConnectionOpts* opts,
             int client_sock,
@@ -86,7 +86,7 @@ server_send(Server* server,
     return netmsg_send(client_sock, server->conn.out_buf, opts->buffer_size, server->token_stream);
 }
 
-static inline int
+static int
 server_broadcast(Server* server,
                  int ignore_sock,
                  ProtocolMsgType type,
@@ -97,26 +97,34 @@ server_broadcast(Server* server,
     protocol_tokenstream_reset(server->token_stream, PROTOCOL_TOKEN_COUNT);
     protocol_tokenstream_add_token(server->token_stream, PROTOCOL_TOKEN_ARG, buf);
     return netmsg_broadcast(server->client_stack->data,
-            server->client_stack->count,
-            ignore_sock,
-            server->conn.out_buf,
-            buffer_size,
-            server->token_stream);
+                            server->client_stack->count,
+                            ignore_sock,
+                            server->conn.out_buf,
+                            buffer_size,
+                            server->token_stream);
 }
 
-static inline int
-server_ack(Server* server,
+static int
+server_ack_close(Server* server,
            ConnectionOpts* opts,
-           int socket)
+           ClientPacket* packet)
 {
-    return server_send(server, opts, socket, PROTOCOL_MSG_ACK, "");
+    int sent = server_send(server, opts, packet->socket, PROTOCOL_MSG_ACK, "");
+    close(packet->socket);
+    stack_remove_at(server->client_stack, packet->client);
+
+    if (sent < 1) {
+        fprintf(stderr, "Failed to send acknowledgement message back to client '%d'\n", packet->socket);
+        return -1;
+    }
+    return sent;
 }
 
 /*****************************************************
  * TASKS & WORKSPACES
  ****************************************************/
 
-static inline void
+static void
 task_write(Task* task, char* value) {
     int len = strlen(value);
     memcpy(task->buf + task->buf_loc, value, len);
@@ -187,11 +195,22 @@ server_task_launch(Server* server, char* task_name, char** envs) {
     if (new_task->wait) {
         for (int i = server->process_stack->count-1; i >= 0; i--) {
             TaskProcess* process = (TaskProcess*)stack_get(server->process_stack, i);
-
             if (process && strcmp(process->task_name, new_task->wait) == 0) {
                 return 1;
             }
         }
+    }
+
+    // Create pipes for child -> server communication
+    int out_fd[2] = {0};
+    int err_fd[2] = {0};
+    if (pipe(out_fd) < 0) {
+        perror("Unable to create STDOUT pipe descriptors for child process");
+        return -1;
+    }
+    if (pipe(err_fd) < 0) {
+        perror("Unable to create STDERR pipe descriptors for child process");
+        return -1;
     }
 
     // Fork process
@@ -205,14 +224,19 @@ server_task_launch(Server* server, char* task_name, char** envs) {
     // Child process
     else if (child_pid == 0) {
         // Set child process STDOUT & STDERR into pipes
-        dup2(server->out_fd[1], STDOUT_FILENO);
-        dup2(server->err_fd[1], STDERR_FILENO);
+        if (dup2(out_fd[1], STDOUT_FILENO) < 0) { perror("Failed to redirect STDOUT to pipe"); exit(errno); }
+        if (dup2(err_fd[1], STDERR_FILENO) < 0) { perror("Failed to redirect STDERR to pipe"); exit(errno); }
 
         char* args[] = { CMD_BINPATH, "-c", new_task->cmd, NULL };
-
         if (new_task->dir != NULL) chdir(new_task->dir);
-        int status = execve(CMD_BINPATH, args, envs);
-        exit(status);
+
+        if (execve(CMD_BINPATH, args, envs) != 0) {
+            perror("Failed to execute command");
+        }
+
+        close(out_fd[1]);
+        close(err_fd[1]);
+        exit(errno);
     }
     // Parent
     else {
@@ -220,14 +244,16 @@ server_task_launch(Server* server, char* task_name, char** envs) {
 
         // Push a new task process to stack
         TaskProcess* process = stack_push_new(server->process_stack);
+        process->out_fd_r = out_fd[0];
+        process->err_fd_r = err_fd[0];
         process->pid = child_pid;
         process->task_name = ((char*)process) + sizeof(TaskProcess);
         memcpy(process->task_name, task_name, name_len);
 
         // Remove launched task data from stack
         stack_pop(server->task_stack);
+        return 0;
     }
-    return 0;
 }
 
 static int
@@ -266,7 +292,7 @@ server_eval_netmsg(ConnectionOpts* opts, Server* server, ClientPacket* packet) {
 
     switch (server->token_stream->type) {
         case PROTOCOL_MSG_TASK_INVOKE: {
-            if (server_ack(server, opts, packet->socket) < 1) {
+            if (server_ack_close(server, opts, packet) < 1) {
                 fprintf(stderr, "Failed to send acknowlegde message to socket '%d'\n", packet->socket);
                 return -1;
             }
@@ -293,7 +319,7 @@ server_eval_netmsg(ConnectionOpts* opts, Server* server, ClientPacket* packet) {
         }
 
         case PROTOCOL_MSG_WORKSPACE_USE: {
-            if (server_ack(server, opts, packet->socket) < 1) {
+            if (server_ack_close(server, opts, packet) < 1) {
                 fprintf(stderr, "Failed to send acknowlegde message to socket '%d'\n", packet->socket);
                 return -1;
             }
@@ -308,7 +334,7 @@ server_eval_netmsg(ConnectionOpts* opts, Server* server, ClientPacket* packet) {
         }
 
         default:
-            if (server_ack(server, opts, packet->socket) < 1) {
+            if (server_ack_close(server, opts, packet) < 1) {
                 fprintf(stderr, "Failed to send acknowlegde message to socket '%d'\n", packet->socket);
                 return -1;
             }
@@ -323,20 +349,34 @@ set_sock_desc(int sock_desc, int* max_sock_desc, fd_set* read_flags) {
     if (sock_desc > *max_sock_desc) *max_sock_desc = sock_desc;
 }
 
+static inline void
+server_cleanup(Server* server) {
+    for (int i = server->client_stack->count-1; i >= 0; i--) {
+        int sock = *(int*)stack_pop(server->client_stack);
+        close(sock);
+    }
+}
+
 static int
 server_check_activity(Server* server, ConnectionOpts* opts) {
     int max_sock_desc = server->conn.socket;
 
-    // Add valid client sockets to descriptor set
-    for (int i = 0; i < opts->max_clients; i++) {
-        set_sock_desc(((int*)server->client_stack->data)[i], &max_sock_desc, &server->conn.read_flags);
+    // Add client sockets to descriptor set
+    for (int i = server->client_stack->count-1; i >= 0; i--) {
+        int sock = *(int*)stack_get(server->client_stack, i);
+        set_sock_desc(sock, &max_sock_desc, &server->conn.read_flags);
     }
 
-    // Add pipe stdout read descriptor to descriptor set
-    set_sock_desc(server->out_fd[0], &max_sock_desc, &server->conn.read_flags);
-    // Add pipe stderr read descriptor to descriptor set
-    set_sock_desc(server->err_fd[0], &max_sock_desc, &server->conn.read_flags);
+    // Add process pipes to descriptor set
+    for (int i = server->process_stack->count-1; i >= 0; i--) {
+        TaskProcess* process = (TaskProcess*)stack_get(server->process_stack, i);
+        if (!process) continue;
 
+        set_sock_desc(process->out_fd_r, &max_sock_desc, &server->conn.read_flags);
+        set_sock_desc(process->err_fd_r, &max_sock_desc, &server->conn.read_flags);
+    }
+
+    // Poll for file descriptor changes
     struct timeval waitd = {0, 33333}; // 30fps
     return select(max_sock_desc + 1, &server->conn.read_flags, NULL, NULL, &waitd);
 }
@@ -347,7 +387,7 @@ server_handle_incoming(Connection* conn, ConnectionOpts* opts, Stack* client_sta
         // Try accepting a new connection from main socket
         socklen_t addr_len = 0;
         int new_socket = accept(conn->socket, (struct sockaddr*)&conn->address, &addr_len);
-        if (new_socket < 0) {
+        if (new_socket < 1) {
             perror("Error accepting new connection");
             return -1;
         }
@@ -371,14 +411,7 @@ server_broadcast_fd(Server* server, ConnectionOpts* opts, ProtocolMsgType type, 
         int value_read = read(fd, server->conn.in_buf, opts->buffer_size);
         if (value_read > 0) {
             printf("%s", server->conn.in_buf);
-            protocol_tokenstream_reset(server->token_stream, PROTOCOL_TOKEN_COUNT);
-            protocol_tokenstream_add_token(server->token_stream, PROTOCOL_TOKEN_ARG, server->conn.in_buf);
-            netmsg_broadcast(server->client_stack->data,
-                             server->client_stack->count,
-                             0,
-                             server->conn.out_buf,
-                             value_read,
-                             server->token_stream);
+            server_broadcast(server, 0, type, server->conn.in_buf, opts->buffer_size);
         }
     }
 }
@@ -389,19 +422,6 @@ server_broadcast_fd(Server* server, ConnectionOpts* opts, ProtocolMsgType type, 
 
 int
 run_as_server(ConnectionOpts* opts) {
-    // Create pipe descriptors for child process STDOUT writes
-    int out_fd[2] = {0};
-    if (pipe(out_fd) < 0) {
-        perror("Unable to create STDOUT pipe descriptors for child processes");
-        return -1;
-    }
-
-    // Create pipe descriptors for child process STDERR writes
-    int err_fd[2] = {0};
-    if (pipe(err_fd) < 0) {
-        perror("Unable to create STDERR pipe descriptors for child processes");
-        return -1;
-    }
 
     // Initialize server
     Server server = {0};
@@ -411,23 +431,18 @@ run_as_server(ConnectionOpts* opts) {
         return -1;
     }
 
-    server.out_fd = out_fd;
-    server.err_fd = err_fd;
-    server.workspace = arena_alloc(sizeof(char) * 256);
-    server.token_stream = protocol_tokenstream_alloc(PROTOCOL_TOKEN_COUNT);
+    server.workspace     = arena_alloc(sizeof(char) * 256);
+    server.token_stream  = protocol_tokenstream_alloc(PROTOCOL_TOKEN_COUNT);
 
-    server.client_stack = stack_new(opts->max_clients, sizeof(int));
+    server.client_stack  = stack_new(opts->max_clients, sizeof(int));
     server.process_stack = stack_new(PROCESS_STACK_COUNT, sizeof(TaskProcess) +
                                      sizeof(char) * TASK_NAME_SIZE);
-    server.packet_stack = stack_new(PACKET_STACK_COUNT,
-                                    (sizeof(int) * 2) + (sizeof(char) * opts->buffer_size));
-    server.task_stack = stack_new(TASK_STACK_COUNT,
-                                  sizeof(Task) +
-                                  (sizeof(char) * TASK_BUF_SIZE) +
-                                  (TASK_VAR_COUNT * sizeof(char*)));
+    server.task_stack    = stack_new(TASK_STACK_COUNT,
+                                     sizeof(Task) +
+                                     (sizeof(char) * TASK_BUF_SIZE) +
+                                     (TASK_VAR_COUNT * sizeof(char*)));
 
     server.running = TRUE;
-
     while(server.running) {
         // Check for any activity in sockets
         connection_init_set(&server.conn, opts);
@@ -444,47 +459,52 @@ run_as_server(ConnectionOpts* opts) {
 
         // Read from client sockets
         for (int i = server.client_stack->count-1; i >= 0; i--) {
-            int sock_desc = ((int*)server.client_stack->data)[i];
+            int sock_desc = *(int*)stack_get(server.client_stack, i);
+            if (sock_desc == 0) {
+                stack_remove_at(server.client_stack, i);
+                continue;
+            }
 
             if (FD_ISSET(sock_desc, &server.conn.read_flags)) {
                 int value_read = read(sock_desc, server.conn.in_buf, opts->buffer_size);
 
                 if (value_read > 0) {
                     ClientPacket packet = {
+                        .client = i,
                         .socket = sock_desc,
                         .len = value_read,
                         .data = server.conn.in_buf,
                     };
-                    stack_push(server.packet_stack, &packet);
+                    server_eval_netmsg(opts, &server, &packet);
                 }
+                // Connection closed
                 else if (value_read == 0) {
                     DEBUG_PRINT("Connection closed - socket %i\n", sock_desc);
                     stack_remove_at(server.client_stack, i);
                     close(sock_desc);
                 }
+                // Error
+                else {
+                    fprintf(stderr, "Error reading data from client socket '%d'", sock_desc);
+                }
             }
         }
 
-        // Process all network messages in stack
-        ClientPacket* packet = (ClientPacket*)stack_pop(server.packet_stack);
-        while (packet != NULL) {
-            server_eval_netmsg(opts, &server, packet);
-            packet = (ClientPacket*)stack_pop(server.packet_stack);
-        }
-
-        // Read and broadcast STDOUT & STDERR messages from child processes
-        server_broadcast_fd(&server, opts, PROTOCOL_MSG_PRINT_OUT, server.out_fd[0]);
-        server_broadcast_fd(&server, opts, PROTOCOL_MSG_PRINT_ERR, server.err_fd[0]);
-
-        // Check running processes
+        // Check running task processes
         for (int i = server.process_stack->count-1; i >= 0; i--) {
             TaskProcess* process = (TaskProcess*)stack_get(server.process_stack, i);
             if (process == NULL) continue;
 
+            // Check process status
             int status = 0;
             pid_t w_pid = waitpid(process->pid, &status, WNOHANG | WUNTRACED);
 
             if (w_pid != 0) {
+                int name_len = strlen(process->task_name);
+                char name_buf[name_len+1];
+                memset(name_buf, 0, name_len+1);
+                memcpy(name_buf, process->task_name, name_len);
+
                 // Error
                 if (w_pid < 0) {
                     perror("Error waiting for task process");
@@ -492,24 +512,25 @@ run_as_server(ConnectionOpts* opts) {
                 // PID returned with status
                 else if (w_pid > 0) {
                     SERVER_PRINT_BROADCAST(&server, "Task '%s' finished with status code '%d'\n",
-                            process->task_name,
+                            name_buf,
                             status);
                 }
 
-                // If we have a name of the completed task, check for queued tasks waiting for it
-                if (process->task_name) {
-                    int name_len = strlen(process->task_name);
-                    char name_buf[name_len+1];
-                    memcpy(name_buf, process->task_name, name_len);
-                    stack_remove_at(server.process_stack, i);
-                    server_check_task_queue(&server, name_buf, name_len);
-                }
+                close(process->out_fd_r);
+                close(process->err_fd_r);
+                stack_remove_at(server.process_stack, i);
+                server_check_task_queue(&server, name_buf, name_len);
+            }
+            else {
+                // Read and broadcast STDOUT & STDERR messages from child process
+                server_broadcast_fd(&server, opts, PROTOCOL_MSG_PRINT_OUT, process->out_fd_r);
+                server_broadcast_fd(&server, opts, PROTOCOL_MSG_PRINT_ERR, process->err_fd_r);
             }
         }
+
     }
 
-    close(server.out_fd[0]);
-    close(server.out_fd[1]);
+    server_cleanup(&server);
     return 0;
 }
 

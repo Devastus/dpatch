@@ -55,7 +55,7 @@ is_space(char c) {
     return c == ' ' || c == '\t';
 }
 
-static inline int
+static inline void
 trim_start_end(char* buf, int* start, int* end) {
     while(is_space(buf[*start])) {
         *start += 1;
@@ -84,7 +84,7 @@ copy_to_buf(char* in_buf, int start, int end, char* out_buf, int out_loc) {
 static inline int
 copy_trimmed_to_buf(char* in_buf, int start, int end, char* out_buf, int out_loc) {
     trim_start_end(in_buf, &start, &end);
-    copy_to_buf(in_buf, start, end, out_buf, out_loc);
+    return copy_to_buf(in_buf, start, end, out_buf, out_loc);
 }
 
 static int

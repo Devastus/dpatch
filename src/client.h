@@ -194,7 +194,6 @@ run_as_monitor(ConnectionOpts* opts) {
     }
 
     char running = 1;
-    char in = 0;
 
     while (running > 0) {
         connection_init_set(&conn, opts);

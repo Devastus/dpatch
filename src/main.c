@@ -28,7 +28,8 @@ typedef struct Args_st {
     int cmd_count;
 } Args;
 
-void collect_args(Args* args, int argc, char** argv) {
+void
+collect_args(Args* args, int argc, char** argv) {
     if (!args) args = &(Args){0};
 
     args->cmd_indices = (int*)arena_alloc(sizeof(int) * argc);
@@ -93,6 +94,7 @@ main(int argc, char** argv, char** envp) {
 
     int ret_code = 0;
     signal(SIGINT, finish);
+    signal(SIGTERM, finish);
 
     switch (args.run_mode) {
         case RUNMODE_SERVER:

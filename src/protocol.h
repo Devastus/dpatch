@@ -13,12 +13,8 @@ typedef enum {
     PROTOCOL_MSG_ACK,
     PROTOCOL_MSG_WORKSPACE_GET,
     PROTOCOL_MSG_WORKSPACE_USE,
-    /* PROTOCOL_MSG_WORKSPACE_LOAD, */
-    /* PROTOCOL_MSG_WORKSPACE_REMOVE, */
     PROTOCOL_MSG_TASK_GET,
-    /* PROTOCOL_MSG_TASK_CREATE, */
     PROTOCOL_MSG_TASK_INVOKE,
-    /* PROTOCOL_MSG_TASK_REMOVE, */
     PROTOCOL_MSG_TASK_COMPLETE,
     PROTOCOL_MSG_PRINT_OUT,
     PROTOCOL_MSG_PRINT_ERR,
@@ -44,8 +40,10 @@ typedef struct ProtocolTokenStream_st {
 
 /// Allocate a new token stream object.
 ProtocolTokenStream* protocol_tokenstream_alloc(int token_length);
+/// Reset a token stream
 void protocol_tokenstream_reset(ProtocolTokenStream* token_stream, int token_length);
-int protocol_tokenstream_add_token(ProtocolTokenStream* token_stream, ProtocolTokenType type, char* value);
+/// Add a new token into token stream
+void protocol_tokenstream_add_token(ProtocolTokenStream* token_stream, ProtocolTokenType type, char* value);
 /// Deserialize a byte buffer into a token stream.
 int protocol_buf_to_tokenstream(char* in_buf, int in_buf_len, int in_buf_loc, ProtocolTokenStream* token_stream);
 /// Serialize token stream into a byte buffer.
@@ -74,7 +72,7 @@ protocol_tokenstream_reset(ProtocolTokenStream* token_stream, int token_length) 
     memset(token_stream->tokens, 0, sizeof(ProtocolToken) * token_length);
 }
 
-int
+void
 protocol_tokenstream_add_token(ProtocolTokenStream* token_stream, ProtocolTokenType type, char* value) {
     token_stream->tokens[token_stream->length] = (ProtocolToken){
         .type = type,

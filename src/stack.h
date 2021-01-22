@@ -17,7 +17,8 @@ typedef struct Stack_st {
 } Stack;
 
 Stack* stack_new(size_t capacity, size_t item_size);
-unsigned char stack_push(Stack* s, void* item);
+size_t stack_push(Stack* s, void* item);
+void* stack_push_new(Stack* s);
 void* stack_pop(Stack* s);
 void* stack_get(Stack* s, int i);
 unsigned char stack_remove_at(Stack* s, int i);
@@ -32,10 +33,6 @@ stack_new(size_t capacity, size_t item_size) {
         fprintf(stderr, "Stack allocation failed");
         return NULL;
     }
-    /* if (arena_alloc(arena, sizeof(Stack) + (item_size * capacity), (void**)&s) != ARENA_OK) { */
-    /*     fprintf(stderr, "Stack allocation failed"); */
-    /*     return NULL; */
-    /* } */
     s->count = 0;
     s->capacity = capacity;
     s->item_size = item_size;
@@ -43,12 +40,21 @@ stack_new(size_t capacity, size_t item_size) {
     return s;
 }
 
-unsigned char
+size_t
 stack_push(Stack* s, void* item) {
-    if (s->count >= s->capacity) return 0;
+    if (s->count >= s->capacity) return -1;
     memcpy(s->data + (s->count * s->item_size), item, s->item_size);
     s->count++;
-    return 1;
+    return s->count-1;
+}
+
+void*
+stack_push_new(Stack* s) {
+    if (s->count >= s->capacity) return NULL;
+    void* ptr = s->data + (s->count * s->item_size);
+    memset(ptr, 0, s->item_size);
+    s->count++;
+    return ptr;
 }
 
 void*

@@ -5,13 +5,17 @@
 #include "protocol.h"
 #include "net.h"
 
-#define INPUT_BUF_SIZE 2048
+#define PROTOCOL_TOKEN_COUNT 30
 
-/*****************************************************
- * NETWORK & IO
- ****************************************************/
+static inline int
+is_cmd(char* cmd, char** cmd_set, int cmd_set_count) {
+    for (int i = 0; i < cmd_set_count; i++) {
+        if(strcmp(cmd, cmd_set[i]) == 0) return 1;
+    }
+    return 0;
+}
 
-static int
+static inline int
 client_check_activity(Connection* conn, ConnectionOpts* opts) {
     struct timeval waitd = {0, 33333}; // 30fps
     return select(conn->socket + 1, &conn->read_flags, NULL, NULL, &waitd);
@@ -36,18 +40,6 @@ client_eval_packet(Connection* conn, ConnectionOpts* opts, ProtocolTokenStream* 
     return 0;
 }
 
-/*****************************************************
- * UI
- ****************************************************/
-
-static inline int
-is_cmd(char* cmd, char** cmd_set, int cmd_set_count) {
-    for (int i = 0; i < cmd_set_count; i++) {
-        if(strcmp(cmd, cmd_set[i]) == 0) return 1;
-    }
-    return 0;
-}
-
 static int
 client_eval_cmds(char** argv,
                  int* cmd_indices,
@@ -56,14 +48,19 @@ client_eval_cmds(char** argv,
 {
     if (cmd_count < 1) return -1;
 
+    msg->type = -1;
     for (int i = 0; i < 2; i++) {
         char* cmd = argv[cmd_indices[i]];
-        if (is_cmd(cmd, (char*[]){"task", "t"}, 2)) msg->type = PROTOCOL_MSG_TASK_INVOKE;
-        else if (is_cmd(cmd, (char*[]){"workspace", "ws", "w"}, 3)) msg->type = PROTOCOL_MSG_WORKSPACE_USE;
-        else if (is_cmd(cmd, (char*[]){"get", "g"}, 2)) {
-            msg->type = cmd_count > 1 ? PROTOCOL_MSG_TASK_GET : PROTOCOL_MSG_WORKSPACE_GET;
-        }
+        if (is_cmd(cmd, (char*[]){"task", "t"}, 2))
+            msg->type = PROTOCOL_MSG_TASK_INVOKE;
+        else if (is_cmd(cmd, (char*[]){"workspace", "ws", "w"}, 3))
+            msg->type = PROTOCOL_MSG_WORKSPACE_USE;
+        else if (is_cmd(cmd, (char*[]){"get", "g"}, 2))
+            msg->type = cmd_count > 1 ?
+                        PROTOCOL_MSG_TASK_GET :
+                        PROTOCOL_MSG_WORKSPACE_GET;
     }
+    if (msg->type < 0) return -1;
 
     msg->length = cmd_count - 1;
 
@@ -91,30 +88,32 @@ client_eval_cmds(char** argv,
 }
 
 /*****************************************************
- * RUN LOOP
+ * RUN LOOP(S)
  ****************************************************/
 
 int
 run_cmd(ConnectionOpts* opts, char** argv, int* cmd_indices, int cmd_count) {
-    ProtocolTokenStream* token_stream = protocol_tokenstream_alloc(10);
+    ProtocolTokenStream* token_stream = protocol_tokenstream_alloc(PROTOCOL_TOKEN_COUNT);
     if (!token_stream) {
         fprintf(stderr, "Unable to allocate protocol token stream\n");
         return -1;
     }
 
     if (client_eval_cmds(argv, cmd_indices, cmd_count, token_stream) < 0) {
-        fprintf(stderr, "Invalid command received\n");
+        fprintf(stderr, "Invalid command received.\n");
         return -1;
     }
 
     Connection conn;
     if (connection_init(opts, &conn) < 1) {
-        fprintf(stderr, "Unable to initialize connection\n");
+        fprintf(stderr, "Unable to initialize connection.\n");
         return -1;
     }
 
+    fprintf(stdout, "Sending command '%s' to dpatch server at port %d\n", NULL, opts->port);
+
     if (netmsg_send(conn.socket, conn.out_buf, opts->buffer_size, token_stream) < 1) {
-        fprintf(stderr, "Unable to send network message\n");
+        fprintf(stderr, "Unable to send network message.\n");
         return -1;
     }
 
@@ -128,7 +127,7 @@ run_cmd(ConnectionOpts* opts, char** argv, int* cmd_indices, int cmd_count) {
         int value_read = read(conn.socket, conn.in_buf, opts->buffer_size);
         if (value_read > 0) {
             if (netmsg_read(conn.in_buf, opts->buffer_size, token_stream) != 0) {
-                fprintf(stderr, "Received an invalid message from server\n");
+                fprintf(stderr, "Received an invalid message from server.\n");
             }
             else {
                 switch (token_stream->type) {
@@ -136,7 +135,7 @@ run_cmd(ConnectionOpts* opts, char** argv, int* cmd_indices, int cmd_count) {
                         fprintf(stderr, "Error sending command: %s\n", token_stream->tokens[0].value);
                         break;
                     default:
-                        fprintf(stdout, "Command sent succesfully\n");
+                        fprintf(stdout, "Command sent succesfully.\n");
                         break;
                 }
             }
@@ -164,8 +163,8 @@ run_as_monitor(ConnectionOpts* opts) {
         return -1;
     }
 
+    fprintf(stdout, "dpatch monitor connected to server at port %d\n", opts->port);
     char running = 1;
-
     while (running > 0) {
         connection_init_set(&conn, opts);
         FD_SET(STDIN_FILENO, &conn.read_flags);

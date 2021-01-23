@@ -11,6 +11,7 @@
 
 #define ARG_SERVER "-s"
 #define ARG_DETACHED "-d"
+#define ARG_HELP "-h"
 #define ARG_PORT "-p"
 #define ARG_MONITOR "-m"
 
@@ -23,6 +24,7 @@ typedef enum {
 typedef struct Args_st {
     char run_mode;
     char mode_detached;
+    char help;
     int port;
     int* cmd_indices;
     int cmd_count;
@@ -55,6 +57,9 @@ collect_args(Args* args, int argc, char** argv) {
             args->port = atoi(argv[i+1]);
             i++;
         }
+        else if (strncmp(argv[i], ARG_HELP, 2) == 0) {
+            args->help = 1;
+        }
         // Treat as command arguments
         else {
             if (i > 0) {
@@ -63,6 +68,21 @@ collect_args(Args* args, int argc, char** argv) {
             }
         }
     }
+}
+
+static void
+print_help() {
+    fprintf(stdout,
+            "Usage:\n"
+            "  dpatch <-s, -m> [options]\n\t- Run as server or monitor\n"
+            "  dpatch [options] <task|t> name\n\t- Send task launch command with given name to a dpatch server\n"
+            "  dpatch [options] <workspace|ws|w> path/to/file.ini\n\t- Send workspace activation command with given file path to a dpatch server\n"
+            "  dpatch [options] <get|g> [name]\n\t- Request active workspace or specified task info from a dpatch server\n"
+            "Options:\n"
+            "  -s\t\tRun as server (disables regular commands)\n"
+            "  -m\t\tRun as monitor (disables regular commands)\n"
+            "  -p PORT\tAssign the port to serve/connect to (default: 9999)\n"
+            "  -h\t\tSee quick help");
 }
 
 void
@@ -77,6 +97,11 @@ main(int argc, char** argv, char** envp) {
 
     Args args = {0};
     collect_args(&args, argc, argv);
+
+    if (args.help) {
+        print_help();
+        exit(1);
+    }
 
     /* if (args.run_mode == RUNMODE_SERVER && args.mode_detached) { */
     /*     daemonize(); */

@@ -276,7 +276,7 @@ server_check_task_queue(Server* server, char* completed_task_name, int name_len)
 }
 
 static int
-server_eval_netmsg(ConnectionOpts* opts, Server* server, ClientPacket* packet) {
+server_eval_packet(ConnectionOpts* opts, Server* server, ClientPacket* packet) {
     if (netmsg_read(packet->data, opts->buffer_size, server->token_stream) != 0) {
         fprintf(stderr, "Received an invalid message from client\n");
         return -1;
@@ -422,7 +422,6 @@ server_broadcast_fd(Server* server, ConnectionOpts* opts, ProtocolMsgType type, 
 
 int
 run_as_server(ConnectionOpts* opts) {
-
     // Initialize server
     Server server = {0};
     server.conn = (Connection){0};
@@ -433,7 +432,6 @@ run_as_server(ConnectionOpts* opts) {
 
     server.workspace     = arena_alloc(sizeof(char) * 256);
     server.token_stream  = protocol_tokenstream_alloc(PROTOCOL_TOKEN_COUNT);
-
     server.client_stack  = stack_new(opts->max_clients, sizeof(int));
     server.process_stack = stack_new(PROCESS_STACK_COUNT, sizeof(TaskProcess) +
                                      sizeof(char) * TASK_NAME_SIZE);
@@ -441,7 +439,17 @@ run_as_server(ConnectionOpts* opts) {
                                      sizeof(Task) +
                                      (sizeof(char) * TASK_BUF_SIZE) +
                                      (TASK_VAR_COUNT * sizeof(char*)));
+    if (!server.workspace     ||
+        !server.token_stream  ||
+        !server.client_stack  ||
+        !server.process_stack ||
+        !server.task_stack)
+    {
+        fprintf(stderr, "Failed to allocate server data\n");
+        return -1;
+    }
 
+    fprintf(stdout, "dpatch server started at port %d\n", opts->port);
     server.running = TRUE;
     while(server.running) {
         // Check for any activity in sockets
@@ -475,7 +483,7 @@ run_as_server(ConnectionOpts* opts) {
                         .len = value_read,
                         .data = server.conn.in_buf,
                     };
-                    server_eval_netmsg(opts, &server, &packet);
+                    server_eval_packet(opts, &server, &packet);
                 }
                 // Connection closed
                 else if (value_read == 0) {

@@ -129,6 +129,7 @@ protocol_tokenstream_to_buf(ProtocolTokenStream* token_stream,
 
     for (int i = 0; i < token_stream->length; i++) {
         ProtocolToken token = token_stream->tokens[i];
+        if (token.type == PROTOCOL_TOKEN_NONE || !token.value) continue;
 
         *(unsigned char*)(out_buf + cur) = token.type;
         cur += sizeof(unsigned char);

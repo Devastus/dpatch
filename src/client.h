@@ -64,24 +64,24 @@ client_eval_cmds(char** argv,
 
     msg->length = cmd_count - 1;
 
-    int token_idx = 0;
     for (int i = 1; i < cmd_count; i++) {
         char* cmd = argv[cmd_indices[i]];
         if(cmd == NULL) break;
 
+        ProtocolTokenType type = PROTOCOL_TOKEN_NONE;
+
         // Environment variable
         if (strcmp(cmd, "-e") == 0) {
-            msg->tokens[token_idx].type = PROTOCOL_TOKEN_VAR;
+            type = PROTOCOL_TOKEN_VAR;
             i++;
             cmd = argv[cmd_indices[i]];
         }
         // Argument
         else {
-            msg->tokens[token_idx].type = PROTOCOL_TOKEN_ARG;
+            type = PROTOCOL_TOKEN_ARG;
         }
 
-        msg->tokens[token_idx].value = cmd;
-        token_idx++;
+        protocol_tokenstream_add_token(msg, type, cmd);
     }
 
     return 0;

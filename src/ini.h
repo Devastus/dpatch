@@ -24,7 +24,7 @@ typedef enum {
 } IniRetCode;
 
 typedef void(*IniHandler)(void*, char*, char*, char*);
-typedef void(*IniSectionHandler)(void*, char*);
+/* typedef void(*IniSectionHandler)(void*, char*); */
 
 IniRetCode ini_parse(FILE* fp, IniHandler handler, void* data);
 /* IniRetCode ini_parse_section(FILE* fp, char* section, IniSectionHandler handler, void* data); */
@@ -108,7 +108,9 @@ parse_line(IniHandler handler, void* data, IniParseState* state) {
                 }
             }
             else {
-                if (state->mode == PARSEMODE_VALUE) handler(data, state->section, state->key, state->value);
+                if (state->mode == PARSEMODE_VALUE) {
+                    handler(data, state->section, state->key, state->value);
+                };
 
                 if (c == '\n') {
                     if (state->mode != PARSEMODE_MULTILINE) {
@@ -220,15 +222,14 @@ ini_parse(FILE* fp, IniHandler handler, void* data) {
     memset(buf, 0, INI_BUF_SIZE);
 
     IniParseState state = {0};
-    state.line = buf;
-    state.section = buf + INI_LINE_BUF_SIZE;
-    state.key = state.section + INI_SECTION_BUF_SIZE;
-    state.value = state.key + INI_KEY_BUF_SIZE;
-    state.value_loc = 0;
-    state.save_loc = 0;
-    state.mode = PARSEMODE_STARTLINE;
-
-    IniRetCode status = INI_OK;
+    state.line          = buf;
+    state.section       = buf + INI_LINE_BUF_SIZE;
+    state.key           = state.section + INI_SECTION_BUF_SIZE;
+    state.value         = state.key + INI_KEY_BUF_SIZE;
+    state.value_loc     = 0;
+    state.save_loc      = 0;
+    state.mode          = PARSEMODE_STARTLINE;
+    IniRetCode status   = INI_OK;
 
     while (fgets(state.line, INI_LINE_BUF_SIZE, fp)) {
         status = parse_line(handler, data, &state);

@@ -37,6 +37,7 @@
 
 typedef struct Task_st {
     int buf_loc;
+    int var_count;
     char* cmd;
     char* dir;
     char* wait;
@@ -111,7 +112,7 @@ server_ack_close(Server* server,
 {
     int sent = server_send(server, opts, packet->socket, PROTOCOL_MSG_ACK, "");
     close(packet->socket);
-    stack_remove_at(server->client_stack, packet->client);
+    stack_remove_at_fast(server->client_stack, packet->client);
 
     if (sent < 1) {
         fprintf(stderr, "Failed to send acknowledgement message back to client '%d'\n", packet->socket);
@@ -124,12 +125,14 @@ server_ack_close(Server* server,
  * TASKS & WORKSPACES
  ****************************************************/
 
-static void
-task_write(Task* task, char* value) {
+static char*
+task_write(Task* task, char* value, char end_char) {
     int len = strlen(value);
-    memcpy(task->buf + task->buf_loc, value, len);
-    (task->buf + task->buf_loc)[len] = '\0';
+    char* ptr = task->buf + task->buf_loc;
+    memcpy(ptr, value, len);
+    ptr[len] = end_char;
     task->buf_loc += len + 1;
+    return ptr;
 }
 
 static void
@@ -153,9 +156,11 @@ workspace_task_get(void* data, char* section, char* name, char* value) {
         }
         else {
             // TODO: Add rest as arbitrary key-value variable pairs
+            task->vars[task->var_count] = task_write(task, name, '=');
+            task->var_count++;
         }
 
-        task_write(task, value);
+        task_write(task, value, '\0');
     }
 }
 
@@ -175,21 +180,48 @@ get_from_ws(Server* server, IniHandler handler, void* data) {
     return status;
 }
 
-static int
-server_task_launch(Server* server, char* task_name, char** envs) {
+static inline Task*
+get_task(Server* server, char* task_name, char** envs) {
+    if (!task_name) return NULL;
+
+    // Allocate new Task into the stack
     int name_len = strlen(task_name);
     Task* new_task = stack_push_new(server->task_stack);
     new_task->buf_loc = 0;
     new_task->buf = (char*)new_task + sizeof(Task);
     new_task->vars = (char**)(new_task->buf + TASK_BUF_SIZE);
-    new_task->name = new_task->buf;
-    task_write(new_task, task_name);
+    new_task->name = task_write(new_task, task_name, '\0');
 
-    // Try parse Task data from active workspace INI file
+    // Try parse Task data from active workspace INI file, remove from stack if parse fails
     if (get_from_ws(server, workspace_task_get, new_task) != 0) {
         fprintf(stderr, "Task '%s' does not exist\n", task_name);
-        return -1;
+        stack_pop(server->task_stack);
+        return NULL;
     }
+
+    if (!new_task->cmd) {
+        fprintf(stderr, "Task '%s' is invalid\n", task_name);
+        stack_pop(server->task_stack);
+        return NULL;
+    }
+
+    // Apply environment variables to existing Task variables
+    if (envs != NULL) {
+        int e = 0;
+        char* env = envs[e];
+        while (env != NULL) {
+            new_task->vars[e + new_task->var_count] = task_write(new_task, env, '\0');
+            e++;
+            env = envs[e];
+        }
+    }
+
+    return new_task;
+}
+
+static int
+server_task_launch(Server* server, Task* new_task) {
+    if (!new_task) return -1;
 
     // If task is set to wait an existing process, simply return to queue it instead
     if (new_task->wait) {
@@ -230,7 +262,7 @@ server_task_launch(Server* server, char* task_name, char** envs) {
         char* args[] = { CMD_BINPATH, "-c", new_task->cmd, NULL };
         if (new_task->dir != NULL) chdir(new_task->dir);
 
-        if (execve(CMD_BINPATH, args, envs) != 0) {
+        if (execve(CMD_BINPATH, args, new_task->vars) != 0) {
             perror("Failed to execute command");
         }
 
@@ -248,7 +280,7 @@ server_task_launch(Server* server, char* task_name, char** envs) {
         process->err_fd_r = err_fd[0];
         process->pid = child_pid;
         process->task_name = ((char*)process) + sizeof(TaskProcess);
-        memcpy(process->task_name, task_name, name_len);
+        memcpy(process->task_name, new_task->name, strlen(new_task->name));
 
         // Remove launched task data from stack
         stack_pop(server->task_stack);
@@ -265,10 +297,11 @@ static int
 server_check_task_queue(Server* server, char* completed_task_name, int name_len) {
     for (int i = server->task_stack->count-1; i >= 0; i--) {
         Task* t = (Task*)stack_get(server->task_stack, i);
+        if (!t) break;
 
         if (t->wait != NULL && strncmp(t->wait, completed_task_name, name_len) == 0) {
-            server_task_launch(server, t->name, t->vars);
-            stack_remove_at(server->task_stack, i);
+            server_task_launch(server, t);
+            stack_remove_at_fast(server->task_stack, i);
             return 0;
         }
     }
@@ -297,7 +330,8 @@ server_eval_packet(ConnectionOpts* opts, Server* server, ClientPacket* packet) {
                 return -1;
             }
 
-            int launch_status = server_task_launch(server, args[0], vars);
+            Task* new_task = get_task(server, args[0], vars);
+            int launch_status = server_task_launch(server, new_task);
             if (launch_status < 0) {
                 fprintf(stderr, "Failed to launch task '%s'\n", args[0]);
                 return -1;
@@ -469,7 +503,7 @@ run_as_server(ConnectionOpts* opts) {
         for (int i = server.client_stack->count-1; i >= 0; i--) {
             int sock_desc = *(int*)stack_get(server.client_stack, i);
             if (sock_desc == 0) {
-                stack_remove_at(server.client_stack, i);
+                stack_remove_at_fast(server.client_stack, i);
                 continue;
             }
 
@@ -488,7 +522,7 @@ run_as_server(ConnectionOpts* opts) {
                 // Connection closed
                 else if (value_read == 0) {
                     DEBUG_PRINT("Connection closed - socket %i\n", sock_desc);
-                    stack_remove_at(server.client_stack, i);
+                    stack_remove_at_fast(server.client_stack, i);
                     close(sock_desc);
                 }
                 // Error
@@ -521,12 +555,12 @@ run_as_server(ConnectionOpts* opts) {
                 else if (w_pid > 0) {
                     SERVER_PRINT_BROADCAST(&server, "Task '%s' finished with status code '%d'\n",
                             name_buf,
-                            status);
+                            WEXITSTATUS(status));
                 }
 
                 close(process->out_fd_r);
                 close(process->err_fd_r);
-                stack_remove_at(server.process_stack, i);
+                stack_remove_at_fast(server.process_stack, i);
                 server_check_task_queue(&server, name_buf, name_len);
             }
             else {

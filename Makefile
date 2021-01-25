@@ -6,9 +6,9 @@ TARGET_DIR = bin
 TESTS_DIR = tests
 
 CC = gcc
-CFLAGS = -std=c11 -pedantic -Wall
+CFLAGS = -std=c11 -Wall
 LDFLAGS =
-DEFINES = -DLOG_LEVEL=1
+DEFINES = -DLOG_LEVEL=1 -DSERVER_DEBUG
 
 INCLUDE_DIRS = $(SRC_DIR)
 INCLUDES = $(addprefix -I, $(INCLUDE_DIRS)) -Ilib

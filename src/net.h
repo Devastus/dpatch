@@ -173,7 +173,7 @@ netmsg_send(int socket, char* data_buf, int buf_len, ProtocolTokenStream* token_
     length += sizeof(int);
     *((int*)data_buf) = length;
 
-    return socket_send(socket, data_buf, length);
+    return send(socket, data_buf, length, 0);
 }
 
 int
@@ -196,7 +196,7 @@ netmsg_broadcast(int* sockets,
     for (int i = 0; i < socket_count; i++) {
         int c_sock = sockets[i];
         if (c_sock > 0 && c_sock != ignore_sock) {
-            if (socket_send(c_sock, data_buf, length) < 1) {
+            if (send(c_sock, data_buf, length, 0) < 1) {
                 fprintf(stderr, "Failed to broadcast message to socket %d\n", c_sock);
             }
         }

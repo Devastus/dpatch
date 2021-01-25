@@ -17,7 +17,7 @@ is_cmd(char* cmd, char** cmd_set, int cmd_set_count) {
 
 static inline int
 client_check_activity(Connection* conn, ConnectionOpts* opts) {
-    struct timeval waitd = {0, 33333}; // 30fps
+    struct timeval waitd = {0, 66666}; // 15fps
     return select(conn->socket + 1, &conn->read_flags, NULL, NULL, &waitd);
 }
 
@@ -51,14 +51,19 @@ client_eval_cmds(char** argv,
     msg->type = -1;
     for (int i = 0; i < 2; i++) {
         char* cmd = argv[cmd_indices[i]];
-        if (is_cmd(cmd, (char*[]){"task", "t"}, 2))
+        if (is_cmd(cmd, (char*[]){"task", "t"}, 2)) {
             msg->type = PROTOCOL_MSG_TASK_INVOKE;
-        else if (is_cmd(cmd, (char*[]){"workspace", "ws", "w"}, 3))
+        }
+        else if (is_cmd(cmd, (char*[]){"workspace", "ws", "w"}, 3)) {
             msg->type = PROTOCOL_MSG_WORKSPACE_USE;
-        else if (is_cmd(cmd, (char*[]){"get", "g"}, 2))
+        }
+        else if (is_cmd(cmd, (char*[]){"get", "g"}, 2)) {
             msg->type = cmd_count > 1 ?
                         PROTOCOL_MSG_TASK_GET :
                         PROTOCOL_MSG_WORKSPACE_GET;
+            fprintf(stderr, "Get is not implemented yet\n");
+            return -1;
+        }
     }
     if (msg->type < 0) return -1;
 
@@ -106,11 +111,10 @@ run_cmd(ConnectionOpts* opts, char** argv, int* cmd_indices, int cmd_count) {
 
     Connection conn;
     if (connection_init(opts, &conn) < 1) {
-        fprintf(stderr, "Unable to initialize connection.\n");
         return -1;
     }
 
-    fprintf(stdout, "Sending command '%s' to dpatch server at port %d\n", NULL, opts->port);
+    fprintf(stdout, "Sending command to dpatch server at port %d...\n", opts->port);
 
     if (netmsg_send(conn.socket, conn.out_buf, opts->buffer_size, token_stream) < 1) {
         fprintf(stderr, "Unable to send network message.\n");
@@ -118,32 +122,32 @@ run_cmd(ConnectionOpts* opts, char** argv, int* cmd_indices, int cmd_count) {
     }
 
     // Expect response from server
-    struct pollfd fd;
-    fd.fd = conn.socket;
-    fd.events = POLLIN;
-    int poll_ret = poll(&fd, 1, opts->client_timeout_ms);
+    /* struct pollfd fd; */
+    /* fd.fd        = conn.socket; */
+    /* fd.events    = POLLIN; */
+    /* int poll_ret = poll(&fd, 1, opts->client_timeout_ms); */
 
-    if (poll_ret > 0) {
-        int value_read = read(conn.socket, conn.in_buf, opts->buffer_size);
-        if (value_read > 0) {
-            if (netmsg_read(conn.in_buf, opts->buffer_size, token_stream) != 0) {
-                fprintf(stderr, "Received an invalid message from server.\n");
-            }
-            else {
-                switch (token_stream->type) {
-                    case PROTOCOL_MSG_PRINT_ERR:
-                        fprintf(stderr, "Error sending command: %s\n", token_stream->tokens[0].value);
-                        break;
-                    default:
-                        fprintf(stdout, "Command sent succesfully.\n");
-                        break;
-                }
-            }
-        }
-    }
-    else {
-        fprintf(stderr, "Connection timeout after %ims\n", opts->client_timeout_ms);
-    }
+    /* if (poll_ret > 0) { */
+    /*     int value_read = read(conn.socket, conn.in_buf, opts->buffer_size); */
+    /*     if (value_read > 0) { */
+    /*         if (netmsg_read(conn.in_buf, opts->buffer_size, token_stream) != 0) { */
+    /*             fprintf(stderr, "Received an invalid message from server.\n"); */
+    /*         } */
+    /*         else { */
+    /*             switch (token_stream->type) { */
+    /*                 case PROTOCOL_MSG_PRINT_ERR: */
+    /*                     fprintf(stderr, "Error sending command: %s\n", token_stream->tokens[0].value); */
+    /*                     break; */
+    /*                 default: */
+    /*                     fprintf(stdout, "Command sent succesfully.\n"); */
+    /*                     break; */
+    /*             } */
+    /*         } */
+    /*     } */
+    /* } */
+    /* else { */
+    /*     fprintf(stderr, "Connection timeout after %ims\n", opts->client_timeout_ms); */
+    /* } */
 
     connection_close(&conn);
     return 0;

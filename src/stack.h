@@ -55,7 +55,7 @@ stack_new(size_t capacity, size_t item_size) {
 size_t
 stack_push(Stack* s, void* item) {
     if (s->count >= s->capacity) return -1;
-    memcpy(s->data + (s->count * s->item_size), item, s->item_size);
+    memcpy((char*)s->data + (s->count * s->item_size), item, s->item_size);
     s->count++;
     return s->count-1;
 }
@@ -63,10 +63,10 @@ stack_push(Stack* s, void* item) {
 void*
 stack_push_new(Stack* s) {
     if (s->count >= s->capacity) return NULL;
-    void* ptr = s->data + (s->count * s->item_size);
+    char* ptr = (char*)s->data + (s->count * s->item_size);
     memset(ptr, 0, s->item_size);
     s->count++;
-    return ptr;
+    return (void*)ptr;
 }
 
 void*

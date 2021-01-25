@@ -8,6 +8,8 @@
 #define PROTOCOL_IMPL
 #include "protocol.h"
 #include "net.h"
+#define STORE_IMPL
+#include "store.h"
 #define STACK_IMPL
 #include "stack.h"
 #define INI_IMPL
@@ -68,6 +70,8 @@ typedef struct Server_st {
     Stack* client_stack;
     Stack* process_stack;
     Stack* task_stack;
+    Store* process_store;
+    Store* task_store;
 } Server;
 
 /*****************************************************
@@ -110,15 +114,16 @@ server_ack_close(Server* server,
            ConnectionOpts* opts,
            ClientPacket* packet)
 {
-    int sent = server_send(server, opts, packet->socket, PROTOCOL_MSG_ACK, "");
+    /* int sent = server_send(server, opts, packet->socket, PROTOCOL_MSG_ACK, ""); */
     close(packet->socket);
     stack_remove_at_fast(server->client_stack, packet->client);
 
-    if (sent < 1) {
-        fprintf(stderr, "Failed to send acknowledgement message back to client '%d'\n", packet->socket);
-        return -1;
-    }
-    return sent;
+    /* if (sent < 1) { */
+    /*     fprintf(stderr, "Failed to send acknowledgement message back to client '%d'\n", packet->socket); */
+    /*     return -1; */
+    /* } */
+    /* return sent; */
+    return 1;
 }
 
 /*****************************************************
@@ -130,14 +135,10 @@ task_write(Task* task, char* value, char end_char) {
     int len = strlen(value);
     char* ptr = task->buf + task->buf_loc;
     memcpy(ptr, value, len);
+
     ptr[len] = end_char;
     task->buf_loc += len + 1;
     return ptr;
-}
-
-static void
-workspace_task_list(void* ws, const char* section, const char* name, const char* value) {
-
 }
 
 static void
@@ -180,29 +181,35 @@ get_from_ws(Server* server, IniHandler handler, void* data) {
     return status;
 }
 
-static inline Task*
+static inline KeyValue
 get_task(Server* server, char* task_name, char** envs) {
-    if (!task_name) return NULL;
+    if (!task_name) return KEYVALUE_NONE;
 
-    // Allocate new Task into the stack
-    int name_len = strlen(task_name);
-    Task* new_task = stack_push_new(server->task_stack);
+    // Allocate new Task into task stack
+    KeyValue res = store_push_empty(server->task_store);
+    if (!res.value) {
+        fprintf(stderr, "Task store capacity reached\n");
+        return KEYVALUE_NONE;
+    }
+    Task* new_task = res.value;
+
     new_task->buf_loc = 0;
-    new_task->buf = (char*)new_task + sizeof(Task);
-    new_task->vars = (char**)(new_task->buf + TASK_BUF_SIZE);
-    new_task->name = task_write(new_task, task_name, '\0');
+    new_task->buf     = (char*)new_task + sizeof(Task);
+    new_task->vars    = (char**)(new_task->buf + TASK_BUF_SIZE);
+    new_task->name    = task_write(new_task, task_name, '\0');
 
-    // Try parse Task data from active workspace INI file, remove from stack if parse fails
+    // Try parse Task data from active workspace INI file, remove from task stack if parse fails
     if (get_from_ws(server, workspace_task_get, new_task) != 0) {
         fprintf(stderr, "Task '%s' does not exist\n", task_name);
-        stack_pop(server->task_stack);
-        return NULL;
+        store_remove_at(server->task_store, res.key);
+        return KEYVALUE_NONE;
     }
 
+    // If task has no cmd, it cannot be executed
     if (!new_task->cmd) {
-        fprintf(stderr, "Task '%s' is invalid\n", task_name);
-        stack_pop(server->task_stack);
-        return NULL;
+        fprintf(stderr, "Task '%s' is invalid: missing 'cmd' value\n", task_name);
+        store_remove_at(server->task_store, res.key);
+        return KEYVALUE_NONE;
     }
 
     // Apply environment variables to existing Task variables
@@ -216,21 +223,18 @@ get_task(Server* server, char* task_name, char** envs) {
         }
     }
 
-    return new_task;
+    return res;
 }
 
 static int
 server_task_launch(Server* server, Task* new_task) {
-    if (!new_task) return -1;
-
-    // If task is set to wait an existing process, simply return to queue it instead
-    if (new_task->wait) {
-        for (int i = server->process_stack->count-1; i >= 0; i--) {
-            TaskProcess* process = (TaskProcess*)stack_get(server->process_stack, i);
-            if (process && strcmp(process->task_name, new_task->wait) == 0) {
-                return 1;
-            }
-        }
+    if (!new_task) {
+        fprintf(stderr, "Task is NULL\n");
+        return -1;
+    };
+    if (server->process_store->open_cnt < 1) {
+        fprintf(stderr, "Process store capacity reached\n");
+        return -1;
     }
 
     // Create pipes for child -> server communication
@@ -260,7 +264,12 @@ server_task_launch(Server* server, Task* new_task) {
         if (dup2(err_fd[1], STDERR_FILENO) < 0) { perror("Failed to redirect STDERR to pipe"); exit(errno); }
 
         char* args[] = { CMD_BINPATH, "-c", new_task->cmd, NULL };
-        if (new_task->dir != NULL) chdir(new_task->dir);
+        if (new_task->dir != NULL) {
+            if (chdir(new_task->dir) != 0) {
+                perror("Failed to change working directory");
+                exit(errno);
+            }
+        }
 
         if (execve(CMD_BINPATH, args, new_task->vars) != 0) {
             perror("Failed to execute command");
@@ -274,37 +283,63 @@ server_task_launch(Server* server, Task* new_task) {
     else {
         DEBUG_PRINT("Parent pid: %d, child pid: %d\n", getpid(), child_pid);
 
-        // Push a new task process to stack
-        TaskProcess* process = stack_push_new(server->process_stack);
-        process->out_fd_r = out_fd[0];
-        process->err_fd_r = err_fd[0];
-        process->pid = child_pid;
-        process->task_name = ((char*)process) + sizeof(TaskProcess);
-        memcpy(process->task_name, new_task->name, strlen(new_task->name));
+        // Push a new task process to store
+        KeyValue res = store_push_empty(server->process_store);
+        if (!res.value) {
+            fprintf(stderr, "Failed to push new process to the process store\n");
+            return -1;
+        }
 
-        // Remove launched task data from stack
-        stack_pop(server->task_stack);
+        TaskProcess* process = res.value;
+        process->out_fd_r    = out_fd[0];
+        process->err_fd_r    = err_fd[0];
+        process->pid         = child_pid;
+        process->task_name   = ((char*)process) + sizeof(TaskProcess);
+        memcpy(process->task_name, new_task->name, strlen(new_task->name));
         return 0;
     }
 }
 
-static int
-server_workspace_get(Server* server) {
+static unsigned char
+server_task_wait_match(Server* server, Task* task) {
+    if (task->wait) {
+        for (int i = server->process_store->capacity-1; i >= 0; i--) {
+            KeyValue res = store_get(server->process_store, i);
+            if (!res.value) continue;
+            TaskProcess* process = res.value;
+
+            if (strcmp(process->task_name, task->wait) == 0) {
+                return 1;
+            }
+        }
+    }
     return 0;
 }
 
 static int
 server_check_task_queue(Server* server, char* completed_task_name, int name_len) {
-    for (int i = server->task_stack->count-1; i >= 0; i--) {
-        Task* t = (Task*)stack_get(server->task_stack, i);
-        if (!t) break;
+    if (server->process_store->open_cnt < 1) {
+        return -1;
+    }
 
-        if (t->wait != NULL && strncmp(t->wait, completed_task_name, name_len) == 0) {
-            server_task_launch(server, t);
-            stack_remove_at_fast(server->task_stack, i);
+    for (int i = server->task_store->capacity-1; i >= 0; i--) {
+        KeyValue res = store_get(server->task_store, i);
+        if (!res.value) continue;
+        Task* task = res.value;
+
+        DEBUG_PRINT("task name: %s, task wait: %s\n", task->name, task->wait);
+
+        if (task->wait == NULL || strncmp(task->wait, completed_task_name, name_len) == 0) {
+            int status = server_task_launch(server, task);
+            if (status < 0) {
+                fprintf(stderr, "Failed to launch task from queue\n");
+                continue;
+            }
+            store_remove_at(server->task_store, res.key);
             return 0;
         }
     }
+
     return -1;
 }
 
@@ -330,27 +365,36 @@ server_eval_packet(ConnectionOpts* opts, Server* server, ClientPacket* packet) {
                 return -1;
             }
 
-            Task* new_task = get_task(server, args[0], vars);
-            int launch_status = server_task_launch(server, new_task);
-            if (launch_status < 0) {
-                fprintf(stderr, "Failed to launch task '%s'\n", args[0]);
+            KeyValue res = get_task(server, args[0], vars);
+            if (!res.value) {
                 return -1;
             }
-            else if (launch_status > 0) {
+
+            Task* new_task = res.value;
+            if (server_task_wait_match(server, new_task)) {
                 SERVER_PRINT_BROADCAST(server, "Queuing task '%s'\n", args[0]);
             }
             else {
-                SERVER_PRINT_BROADCAST(server, "Launching task '%s'\n", args[0]);
+                int launch_status = server_task_launch(server, new_task);
+
+                if (launch_status != 0) {
+                    fprintf(stderr, "Failed to launch task '%s'\n", args[0]);
+                    return -1;
+                }
+                else {
+                    SERVER_PRINT_BROADCAST(server, "Launching task '%s'\n", args[0]);
+                    store_remove_at(server->task_store, res.key);
+                }
             }
 
             break;
         }
 
-        case PROTOCOL_MSG_WORKSPACE_GET: {
-            // TODO: Get workspace info
+        // TODO: Get workspace info
+        /* case PROTOCOL_MSG_WORKSPACE_GET: { */
             /* server_acknowledge(conn, packet); */
-            break;
-        }
+            /* break; */
+        /* } */
 
         case PROTOCOL_MSG_WORKSPACE_USE: {
             if (server_ack_close(server, opts, packet) < 1) {
@@ -402,16 +446,17 @@ server_check_activity(Server* server, ConnectionOpts* opts) {
     }
 
     // Add process pipes to descriptor set
-    for (int i = server->process_stack->count-1; i >= 0; i--) {
-        TaskProcess* process = (TaskProcess*)stack_get(server->process_stack, i);
-        if (!process) continue;
+    for (int i = server->process_store->capacity-1; i >= 0; i--) {
+        KeyValue res = store_get(server->process_store, i);
+        if (!res.value) continue;
+        TaskProcess* process = res.value;
 
         set_sock_desc(process->out_fd_r, &max_sock_desc, &server->conn.read_flags);
         set_sock_desc(process->err_fd_r, &max_sock_desc, &server->conn.read_flags);
     }
 
     // Poll for file descriptor changes
-    struct timeval waitd = {0, 33333}; // 30fps
+    struct timeval waitd = {0, 66666}; // 15fps
     return select(max_sock_desc + 1, &server->conn.read_flags, NULL, NULL, &waitd);
 }
 
@@ -426,13 +471,14 @@ server_handle_incoming(Connection* conn, ConnectionOpts* opts, Stack* client_sta
             return -1;
         }
 
+        // If over the max client limit, instantly close the connection
         if (client_stack->count >= opts->max_clients) {
             close(new_socket);
             return 0;
         }
 
         stack_push(client_stack, &new_socket);
-        DEBUG_PRINT("New connection\n");
+        DEBUG_PRINT("New connection %d\n", new_socket);
         return 1;
     }
     return 0;
@@ -467,17 +513,18 @@ run_as_server(ConnectionOpts* opts) {
     server.workspace     = arena_alloc(sizeof(char) * 256);
     server.token_stream  = protocol_tokenstream_alloc(PROTOCOL_TOKEN_COUNT);
     server.client_stack  = stack_new(opts->max_clients, sizeof(int));
-    server.process_stack = stack_new(PROCESS_STACK_COUNT, sizeof(TaskProcess) +
+    server.process_store = store_new(PROCESS_STACK_COUNT,
+                                     sizeof(TaskProcess) +
                                      sizeof(char) * TASK_NAME_SIZE);
-    server.task_stack    = stack_new(TASK_STACK_COUNT,
+    server.task_store    = store_new(TASK_STACK_COUNT,
                                      sizeof(Task) +
                                      (sizeof(char) * TASK_BUF_SIZE) +
-                                     (TASK_VAR_COUNT * sizeof(char*)));
+                                     (sizeof(char*) * TASK_VAR_COUNT));
     if (!server.workspace     ||
         !server.token_stream  ||
         !server.client_stack  ||
-        !server.process_stack ||
-        !server.task_stack)
+        !server.process_store ||
+        !server.task_store)
     {
         fprintf(stderr, "Failed to allocate server data\n");
         return -1;
@@ -514,8 +561,8 @@ run_as_server(ConnectionOpts* opts) {
                     ClientPacket packet = {
                         .client = i,
                         .socket = sock_desc,
-                        .len = value_read,
-                        .data = server.conn.in_buf,
+                        .len    = value_read,
+                        .data   = server.conn.in_buf,
                     };
                     server_eval_packet(opts, &server, &packet);
                 }
@@ -533,15 +580,18 @@ run_as_server(ConnectionOpts* opts) {
         }
 
         // Check running task processes
-        for (int i = server.process_stack->count-1; i >= 0; i--) {
-            TaskProcess* process = (TaskProcess*)stack_get(server.process_stack, i);
-            if (process == NULL) continue;
+        for (int i = server.process_store->capacity-1; i >= 0; i--) {
+            KeyValue res = store_get(server.process_store, i);
+            if (!res.value) continue;
+            TaskProcess* process = res.value;
 
             // Check process status
             int status = 0;
             pid_t w_pid = waitpid(process->pid, &status, WNOHANG | WUNTRACED);
 
             if (w_pid != 0) {
+                DEBUG_PRINT("Completed process name: %s, pid: %d\n", process->task_name, process->pid);
+
                 int name_len = strlen(process->task_name);
                 char name_buf[name_len+1];
                 memset(name_buf, 0, name_len+1);
@@ -553,14 +603,15 @@ run_as_server(ConnectionOpts* opts) {
                 }
                 // PID returned with status
                 else if (w_pid > 0) {
-                    SERVER_PRINT_BROADCAST(&server, "Task '%s' finished with status code '%d'\n",
-                            name_buf,
-                            WEXITSTATUS(status));
+                    SERVER_PRINT_BROADCAST(&server,
+                                           "Task '%s' finished with status code '%d'\n",
+                                           name_buf,
+                                           WEXITSTATUS(status));
                 }
 
                 close(process->out_fd_r);
                 close(process->err_fd_r);
-                stack_remove_at_fast(server.process_stack, i);
+                store_remove_at(server.process_store, i);
                 server_check_task_queue(&server, name_buf, name_len);
             }
             else {

@@ -122,7 +122,7 @@ arena_alloc(size_t size) {
     while (cur) {
         // Assign to current if there's enough space
         if ((cur->current + size) <= cur->size) {
-            void* p = (void*)(cur->region + cur->current);
+            void* p = (void*)((char*)cur->region + cur->current);
             cur->current += size;
             DEBUG_PRINT("Reserving area %lu / %lu, size: %lu bytes\n", p, (cur->region + cur->current), size);
             return p;

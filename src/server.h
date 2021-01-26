@@ -4,6 +4,7 @@
 #include <errno.h>
 #include <unistd.h>
 #include <wait.h>
+#include <time.h>
 #include "arena.h"
 #define PROTOCOL_IMPL
 #include "protocol.h"
@@ -15,8 +16,8 @@
 #define INI_IMPL
 #include "ini.h"
 
-#define PACKET_STACK_COUNT 10
-#define PROCESS_STACK_COUNT 4
+/* #define PACKET_STACK_COUNT 10 */
+#define PROCESS_STACK_COUNT 5
 #define TASK_STACK_COUNT 5
 #define CMD_BINPATH "/bin/sh"
 #define PROTOCOL_TOKEN_COUNT 30
@@ -30,11 +31,27 @@
 #define DEBUG_PRINT(fmt, ...)
 #endif
 
-#define SERVER_PRINT_BROADCAST(server, fmt, ...) {\
-    char buf[256];\
-    snprintf(buf, 256, fmt, ##__VA_ARGS__);\
-    fprintf(stdout, "%s", buf);\
-    server_broadcast(server, 0, PROTOCOL_MSG_TASK_COMPLETE, buf, 256);\
+#define CREATE_MSG_FMT(buf, size, time, target, msg) {\
+    snprintf(buf, size, "(%s) [%s] %s", time, target, msg);\
+}
+
+#define CREATE_MSG_ARGS(buf, size, time, target, fmt, ...) {\
+    int msg_size = size - 30;\
+    char msg_buf[msg_size];\
+    snprintf(msg_buf, msg_size, fmt, ##__VA_ARGS__);\
+    CREATE_MSG_FMT(buf, size, t_buf, target, msg_buf);\
+}
+
+#define CREATE_MSG_AUTOTIMED(buf, size, target, fmt, ...) {\
+    time_t t = time(0);\
+    char t_buf[30];\
+    strftime(t_buf, 30, "%d/%m/%Y %H:%M:%S", localtime(&t));\
+    CREATE_MSG_ARGS(buf, size, t_buf, target, fmt, ##__VA_ARGS__);\
+}
+
+#define SERVER_PRINT_BROADCAST(server, ptype, buf, size) {\
+    printf("%s", buf);\
+    server_broadcast(server, 0, ptype, buf, size);\
 }
 
 typedef struct Task_st {
@@ -49,6 +66,7 @@ typedef struct Task_st {
 } Task;
 
 typedef struct TaskProcess_st {
+    time_t start_time;
     pid_t pid;
     char* task_name;
     int out_fd_r;
@@ -156,7 +174,6 @@ workspace_task_get(void* data, char* section, char* name, char* value) {
             task->wait = task->buf + task->buf_loc;
         }
         else {
-            // TODO: Add rest as arbitrary key-value variable pairs
             task->vars[task->var_count] = task_write(task, name, '=');
             task->var_count++;
         }
@@ -291,6 +308,7 @@ server_task_launch(Server* server, Task* new_task) {
         }
 
         TaskProcess* process = res.value;
+        process->start_time  = time(0);
         process->out_fd_r    = out_fd[0];
         process->err_fd_r    = err_fd[0];
         process->pid         = child_pid;
@@ -331,11 +349,16 @@ server_check_task_queue(Server* server, char* completed_task_name, int name_len)
 
         if (task->wait == NULL || strncmp(task->wait, completed_task_name, name_len) == 0) {
             int status = server_task_launch(server, task);
-            if (status < 0) {
-                fprintf(stderr, "Failed to launch task from queue\n");
-                continue;
+            if (status != 0) {
+                fprintf(stderr, "Failed to launch task '%s'\n", task->name);
+                return -1;
             }
-            store_remove_at(server->task_store, res.key);
+            else {
+                char buf[256];
+                CREATE_MSG_AUTOTIMED(buf, 256, "server", "Launching task '%s'\n", task->name);
+                SERVER_PRINT_BROADCAST(server, PROTOCOL_MSG_PRINT_OUT, buf, 256);
+                store_remove_at(server->task_store, res.key);
+            }
             return 0;
         }
     }
@@ -371,8 +394,10 @@ server_eval_packet(ConnectionOpts* opts, Server* server, ClientPacket* packet) {
             }
 
             Task* new_task = res.value;
+            char buf[256];
             if (server_task_wait_match(server, new_task)) {
-                SERVER_PRINT_BROADCAST(server, "Queuing task '%s'\n", args[0]);
+                CREATE_MSG_AUTOTIMED(buf, 256, "server", "Queuing task '%s'\n", args[0]);
+                SERVER_PRINT_BROADCAST(server, PROTOCOL_MSG_PRINT_OUT, buf, 256);
             }
             else {
                 int launch_status = server_task_launch(server, new_task);
@@ -382,7 +407,8 @@ server_eval_packet(ConnectionOpts* opts, Server* server, ClientPacket* packet) {
                     return -1;
                 }
                 else {
-                    SERVER_PRINT_BROADCAST(server, "Launching task '%s'\n", args[0]);
+                    CREATE_MSG_AUTOTIMED(buf, 256, "server", "Launching task '%s'\n", args[0]);
+                    SERVER_PRINT_BROADCAST(server, PROTOCOL_MSG_PRINT_OUT, buf, 256);
                     store_remove_at(server->task_store, res.key);
                 }
             }
@@ -407,7 +433,9 @@ server_eval_packet(ConnectionOpts* opts, Server* server, ClientPacket* packet) {
             }
 
             strcpy(server->workspace, args[0]);
-            SERVER_PRINT_BROADCAST(server, "Using workspace '%s'\n", args[0]);
+            char buf[256];
+            CREATE_MSG_AUTOTIMED(buf, 256, "server", "Using workspace '%s'\n", args[0]);
+            SERVER_PRINT_BROADCAST(server, PROTOCOL_MSG_PRINT_OUT, buf, 256);
             break;
         }
 
@@ -485,13 +513,14 @@ server_handle_incoming(Connection* conn, ConnectionOpts* opts, Stack* client_sta
 }
 
 static void
-server_broadcast_fd(Server* server, ConnectionOpts* opts, ProtocolMsgType type, int fd) {
+server_broadcast_fd(Server* server, ConnectionOpts* opts, char* process_name, ProtocolMsgType type, int fd) {
     memset(server->conn.in_buf, 0, opts->buffer_size);
     if (FD_ISSET(fd, &server->conn.read_flags)) {
         int value_read = read(fd, server->conn.in_buf, opts->buffer_size);
         if (value_read > 0) {
-            printf("%s", server->conn.in_buf);
-            server_broadcast(server, 0, type, server->conn.in_buf, opts->buffer_size);
+            char buf[256];
+            CREATE_MSG_AUTOTIMED(buf, 256, process_name, "%s", server->conn.in_buf);
+            SERVER_PRINT_BROADCAST(server, type, buf, 256);
         }
     }
 }
@@ -603,10 +632,23 @@ run_as_server(ConnectionOpts* opts) {
                 }
                 // PID returned with status
                 else if (w_pid > 0) {
-                    SERVER_PRINT_BROADCAST(&server,
-                                           "Task '%s' finished with status code '%d'\n",
-                                           name_buf,
-                                           WEXITSTATUS(status));
+                    char t_buf[30];
+                    time_t t = time(0);
+                    strftime(t_buf, 30, "%d/%m/%Y %H:%M:%S", localtime(&t));
+
+                    time_t diff = t - process->start_time;
+                    char diff_buf[20];
+                    strftime(diff_buf, 20, "%H:%M:%S", localtime(&diff));
+
+                    char buf[256];
+                    CREATE_MSG_ARGS(buf,
+                                    256,
+                                    t_buf,
+                                    "server", "Task '%s' finished in %s with status code '%d'\n",
+                                    name_buf,
+                                    diff_buf,
+                                    WEXITSTATUS(status));
+                    SERVER_PRINT_BROADCAST(&server, PROTOCOL_MSG_TASK_COMPLETE, buf, 256);
                 }
 
                 close(process->out_fd_r);
@@ -616,8 +658,8 @@ run_as_server(ConnectionOpts* opts) {
             }
             else {
                 // Read and broadcast STDOUT & STDERR messages from child process
-                server_broadcast_fd(&server, opts, PROTOCOL_MSG_PRINT_OUT, process->out_fd_r);
-                server_broadcast_fd(&server, opts, PROTOCOL_MSG_PRINT_ERR, process->err_fd_r);
+                server_broadcast_fd(&server, opts, process->task_name, PROTOCOL_MSG_PRINT_OUT, process->out_fd_r);
+                server_broadcast_fd(&server, opts, process->task_name, PROTOCOL_MSG_PRINT_ERR, process->err_fd_r);
             }
         }
 

@@ -15,6 +15,8 @@
 #define MFREE(ptr) free(ptr)
 #endif
 
+#define KEYVALUE_NONE (KeyValue){ -1, NULL }
+
 typedef struct KeyValue_st {
     size_t key;
     void* value;
@@ -28,15 +30,25 @@ typedef struct Store_st {
     char* data;
 } Store;
 
+/// Create a new store of given capacity and item size, returns a pointer to the new store or NULL if failed
 Store* store_new(int capacity, size_t item_size);
+/// Push a new item into the store, returns the index of the new item or -1 if failed or store capacity is full
 void store_free(Store* store);
+/// Push a new item into store, returns key-value-pair of new item index and item data or KEYVALUE_NONE
 KeyValue store_push(Store* store, void* data);
+/// Push a new empty item into store, returns key-value-pair of new item index and item data or KEYVALUE_NONE
 KeyValue store_push_empty(Store* store);
+/// Get an item with given index, returns key-value-pair of item index and data or KEYVALUE_NONE
 KeyValue store_get(Store* store, int idx);
+/// Check if given store index is in use, returns 1 on success and 0 on failure
 unsigned char store_is_used(Store* store, int idx);
+/// Replace data in given store index, returns 1 on success and 0 on failure
 unsigned char store_replace(Store* store, int idx, void* data);
+/// Remove data from given store index, returns 1 on success and 0 on failure
 unsigned char store_remove_at(Store* store, int idx);
+/// Get amount of items in the store (ie. length)
 int store_length(Store* store);
+/// Reset store back to zeroed state (retains capacity and item size)
 void store_reset(Store* store);
 
 #ifdef STORE_IMPL
@@ -45,7 +57,6 @@ void store_reset(Store* store);
 #define ITEM_USED(ptr) (*ptr)
 #define ITEM_VALUE(ptr) (ptr + 1)
 
-#define KEYVALUE_NONE (KeyValue){ -1, NULL }
 #define KEYVALUE(store, idx) (KeyValue){ idx, (void*)ITEM_VALUE(ITEM_IDX(store, idx)) }
 
 static inline int
@@ -151,7 +162,6 @@ store_remove_at(Store* store, int idx) {
     char* ptr = ITEM_IDX(store, idx);
     if (!ITEM_USED(ptr)) return 0;
 
-    /* memset(ptr, 0, store->item_size + 1); */
     ITEM_USED(ptr) = 0;
     store->open[store->open_cnt] = idx;
     store->open_cnt++;

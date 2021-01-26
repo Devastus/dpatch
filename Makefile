@@ -6,9 +6,9 @@ TARGET_DIR = bin
 TESTS_DIR = tests
 
 CC = gcc
-CFLAGS = -std=c11 -Wall
+CFLAGS = -std=c11 -Wall -pedantic
 LDFLAGS =
-DEFINES = -DLOG_LEVEL=1 -DSERVER_DEBUG
+DEFINES =
 
 INCLUDE_DIRS = $(SRC_DIR)
 INCLUDES = $(addprefix -I, $(INCLUDE_DIRS)) -Ilib
@@ -48,7 +48,7 @@ uninstall:
 test:
 	@echo "Compiling and running tests..."
 	rm -f $(TESTS_DIR)/test
-	$(CC) $(TESTS_DIR)/main.c -g $(CFLAGS) $(INCLUDES) -DLOG_LEVEL=0 -Itests -o $(TESTS_DIR)/test
+	$(CC) $(TESTS_DIR)/main.c -g -std=c11 -Wall $(INCLUDES) -DLOG_LEVEL=0 -Itests -o $(TESTS_DIR)/test
 	./$(TESTS_DIR)/test
 	rm -f $(TESTS_DIR)/test
 

@@ -121,6 +121,7 @@ run_cmd(ConnectionOpts* opts, char** argv, int* cmd_indices, int cmd_count) {
         return -1;
     }
 
+    fprintf(stdout, "Command sent succesfully.\n");
     // Expect response from server
     /* struct pollfd fd; */
     /* fd.fd        = conn.socket; */

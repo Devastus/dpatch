@@ -1,5 +1,5 @@
-#ifndef DPATCH_CONNECTION_H
-#define DPATCH_CONNECTION_H
+#ifndef DPATCH_NET_H
+#define DPATCH_NET_H
 
 #include <stdio.h>
 #include <stdint.h>

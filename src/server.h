@@ -16,7 +16,6 @@
 #define INI_IMPL
 #include "ini.h"
 
-/* #define PACKET_STACK_COUNT 10 */
 #define PROCESS_STACK_COUNT 5
 #define TASK_STACK_COUNT 5
 #define CMD_BINPATH "/bin/sh"
@@ -256,12 +255,13 @@ server_task_launch(Server* server, Task* new_task) {
 
     // Create pipes for child -> server communication
     int out_fd[2] = {0};
-    int err_fd[2] = {0};
-    if (pipe(out_fd) < 0) {
+    if (pipe(out_fd) < 0 || socket_set_nonblock(out_fd[0]) != 0) {
         perror("Unable to create STDOUT pipe descriptors for child process");
         return -1;
     }
-    if (pipe(err_fd) < 0) {
+
+    int err_fd[2] = {0};
+    if (pipe(err_fd) < 0 || socket_set_nonblock(err_fd[0]) != 0) {
         perror("Unable to create STDERR pipe descriptors for child process");
         return -1;
     }
@@ -503,6 +503,18 @@ server_handle_incoming(Connection* conn, ConnectionOpts* opts, Stack* client_sta
         if (client_stack->count >= opts->max_clients) {
             close(new_socket);
             return 0;
+        }
+
+        if (socket_set_nonblock(new_socket) != 0) {
+            perror("Failed to set connection socket as non-blocking");
+            return -1;
+        }
+
+        if (socket_set_timeout(new_socket, SO_RCVTIMEO, opts->receive_timeout_secs) != 0 ||
+            socket_set_timeout(new_socket, SO_SNDTIMEO, opts->receive_timeout_secs) != 0)
+        {
+            perror("Failed to set socket timeout options");
+            return -1;
         }
 
         stack_push(client_stack, &new_socket);

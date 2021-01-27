@@ -11,6 +11,7 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <sys/time.h>
+#include <fcntl.h>
 #include "arena.h"
 #include "protocol.h"
 
@@ -35,6 +36,7 @@ typedef struct ConnectionOpts_st {
     int16_t max_clients;
     int16_t max_pending_conn;
     int client_timeout_ms;
+    int receive_timeout_secs;
 } ConnectionOpts;
 
 typedef struct Connection_st {
@@ -49,6 +51,47 @@ typedef struct Connection_st {
 /***************************************************************
  * Connection & sockets
  **************************************************************/
+
+int
+socket_send(int socket, char* buf, int size) {
+    int sent = 0;
+    while (sent < size) {
+        char* ptr = &buf[sent];
+        int s = send(socket, ptr, size - sent, 0);
+        if (s < 1) break;
+        sent += s;
+    }
+    return sent;
+}
+
+/* int */
+/* socket_read(int socket, char* buf, int size) { */
+/*     int readc = 0; */
+/*     while (readc < size) { */
+/*         char* ptr = &buf[readc]; */
+/*         int r = read(socket, ptr, size - readc); */
+/*         if (r < 1) break; */
+/*         readc += r; */
+/*     } */
+/*     return readc; */
+/* } */
+
+int
+socket_set_nonblock(int sock) {
+   int flags;
+   flags = fcntl(sock, F_GETFL, 0);
+   if (-1 == flags)
+      return -1;
+   return fcntl(sock, F_SETFL, flags | O_NONBLOCK);
+}
+
+int
+socket_set_timeout(int sock, int timeout_flag, int timeout_secs) {
+    struct timeval tv;
+    tv.tv_sec = timeout_secs;
+    tv.tv_usec = 0;
+    return setsockopt(sock, SOL_SOCKET, timeout_flag, &tv, sizeof(struct timeval));
+}
 
 int
 connection_init(ConnectionOpts* opts, Connection* conn_ptr) {
@@ -74,9 +117,17 @@ connection_init(ConnectionOpts* opts, Connection* conn_ptr) {
     conn_ptr->out_buf = MMALLOC(sizeof(char) * opts->buffer_size);
     if (!conn_ptr->in_buf) return -1;
 
-    // Set socket options
+    // Set socket to reuse address
     if (setsockopt(conn_ptr->socket, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) < 0) {
-        perror("Unable to set socket options");
+        perror("Unable to set socket reuse address option");
+        return -1;
+    }
+
+    // Set socket read & write timeouts
+    if (socket_set_timeout(conn_ptr->socket, SO_RCVTIMEO, opts->receive_timeout_secs) != 0 ||
+        socket_set_timeout(conn_ptr->socket, SO_SNDTIMEO, opts->receive_timeout_secs) != 0)
+    {
+        perror("Failed to set socket timeout options");
         return -1;
     }
 
@@ -134,30 +185,6 @@ connection_init_set(Connection* conn, ConnectionOpts* opts) {
     memset(conn->out_buf, 0, opts->buffer_size);
 }
 
-int
-socket_send(int socket, char* buf, int size) {
-    int sent = 0;
-    while (sent < size) {
-        char* ptr = &buf[sent];
-        int s = send(socket, ptr, size - sent, 0);
-        if (s < 1) break;
-        sent += s;
-    }
-    return sent;
-}
-
-/* int */
-/* socket_read(int socket, char* buf, int size) { */
-/*     int readc = 0; */
-/*     while (readc < size) { */
-/*         char* ptr = &buf[readc]; */
-/*         int r = read(socket, ptr, size - readc); */
-/*         if (r < 1) break; */
-/*         readc += r; */
-/*     } */
-/*     return readc; */
-/* } */
-
 /***************************************************************
  * Network Message
  **************************************************************/
@@ -196,7 +223,7 @@ netmsg_broadcast(int* sockets,
     for (int i = 0; i < socket_count; i++) {
         int c_sock = sockets[i];
         if (c_sock > 0 && c_sock != ignore_sock) {
-            if (send(c_sock, data_buf, length, 0) < 1) {
+            if (send(c_sock, data_buf, length, MSG_NOSIGNAL) < 1) {
                 fprintf(stderr, "Failed to broadcast message to socket %d\n", c_sock);
             }
         }

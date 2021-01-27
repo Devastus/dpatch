@@ -91,6 +91,12 @@ finish(int sig) {
     exit(sig);
 }
 
+void
+pipe_out(int sig) {
+    // NOTE: We probably need to do some actual handling instead, but this'll do for now
+    fprintf(stderr, "Pipe broken, signal: %d\n", sig);
+}
+
 int
 main(int argc, char** argv, char** envp) {
     arena_init(65536, 3, 1);
@@ -114,12 +120,14 @@ main(int argc, char** argv, char** envp) {
         .max_clients = 30,
         .max_pending_conn = 3,
         .client_timeout_ms = 5000,
+        .receive_timeout_secs = 5,
         .buffer_size = 1024,
     };
 
     int ret_code = 0;
     signal(SIGINT, finish);
     signal(SIGTERM, finish);
+    signal(SIGPIPE, pipe_out);
 
     switch (args.run_mode) {
         case RUNMODE_SERVER:

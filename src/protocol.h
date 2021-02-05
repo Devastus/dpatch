@@ -1,6 +1,8 @@
 #ifndef DPATCH_PROTOCOL_H
 #define DPATCH_PROTOCOL_H
 
+#include "net.h"
+
 #ifdef ALLOC_FUNC
 #define MMALLOC(size) ALLOC_FUNC(size)
 #else
@@ -10,14 +12,13 @@
 typedef enum {
     PROTOCOL_MSG_NONE,
     PROTOCOL_MSG_PING,
-    PROTOCOL_MSG_ACK,
-    PROTOCOL_MSG_WORKSPACE_GET,
-    PROTOCOL_MSG_WORKSPACE_USE,
-    PROTOCOL_MSG_TASK_GET,
-    PROTOCOL_MSG_TASK_INVOKE,
-    PROTOCOL_MSG_TASK_COMPLETE,
-    PROTOCOL_MSG_PRINT_OUT,
-    PROTOCOL_MSG_PRINT_ERR,
+    PROTOCOL_MSG_TASK_RUN,
+    PROTOCOL_MSG_TASK_INFO,
+    PROTOCOL_MSG_WORKSPACE_SET,
+    PROTOCOL_MSG_WORKSPACE_INFO,
+    PROTOCOL_MSG_PROC_INFO,
+    PROTOCOL_MSG_SUCCESS,
+    PROTOCOL_MSG_ERR,
     __PROTOCOL_MSG_COUNT
 } ProtocolMsgType;
 
@@ -41,7 +42,7 @@ typedef struct ProtocolTokenStream_st {
 /// Allocate a new token stream object.
 ProtocolTokenStream* protocol_tokenstream_alloc(int token_length);
 /// Reset a token stream
-void protocol_tokenstream_reset(ProtocolTokenStream* token_stream, int token_length);
+void protocol_tokenstream_reset(ProtocolTokenStream* token_stream);
 /// Add a new token into token stream
 void protocol_tokenstream_add_token(ProtocolTokenStream* token_stream, ProtocolTokenType type, char* value);
 /// Deserialize a byte buffer into a token stream.
@@ -50,6 +51,10 @@ int protocol_buf_to_tokenstream(char* in_buf, int in_buf_len, int in_buf_loc, Pr
 int protocol_tokenstream_to_buf(ProtocolTokenStream* token_stream, char* out_buf, int out_buf_len, int out_buf_loc);
 /// Output token stream into comprised parts.
 int protocol_parse_token_stream(ProtocolTokenStream* token_stream, unsigned char* type, char** args, char** vars);
+/// Send a protocol token stream as a network message, returns number of bytes sent
+int protocol_send(int socket, char* data_buf, int buf_len, ProtocolTokenStream* token_stream);
+/// Read a network message into a protocol token stream, returns 0 if succesful
+int protocol_read(char* data_buf, int buf_len, ProtocolTokenStream* token_stream);
 
 #ifdef PROTOCOL_IMPL
 
@@ -67,9 +72,9 @@ protocol_tokenstream_alloc(int token_length) {
 }
 
 void
-protocol_tokenstream_reset(ProtocolTokenStream* token_stream, int token_length) {
+protocol_tokenstream_reset(ProtocolTokenStream* token_stream) {
+    memset(token_stream->tokens, 0, sizeof(ProtocolToken) * token_stream->length);
     token_stream->length = 0;
-    memset(token_stream->tokens, 0, sizeof(ProtocolToken) * token_length);
 }
 
 void
@@ -165,6 +170,35 @@ int protocol_parse_token_stream(ProtocolTokenStream* token_stream, unsigned char
     }
     args[argc] = NULL;
     vars[varc] = NULL;
+    return 0;
+}
+
+int
+protocol_send(int socket, char* data_buf, int buf_len, ProtocolTokenStream* token_stream) {
+    int length = protocol_tokenstream_to_buf(token_stream, data_buf, buf_len, sizeof(int));
+    if (length < 1) {
+        fprintf(stderr, "Failed to serialize protocol token stream into a buffer\n");
+        return -1;
+    }
+
+    length += sizeof(int);
+    *((int*)data_buf) = length;
+
+    return socket_send(socket, data_buf, length);
+}
+
+int
+protocol_read(char* data_buf, int buf_len, ProtocolTokenStream* token_stream) {
+    int msg_len = *((int*)data_buf);
+    if (protocol_buf_to_tokenstream(data_buf,
+                                    msg_len - sizeof(int),
+                                    sizeof(int),
+                                    token_stream) != 0)
+    {
+        fprintf(stderr, "Failed to deserialize buffer into a protocol token stream\n");
+        return -1;
+    }
+
     return 0;
 }
 

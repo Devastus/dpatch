@@ -12,32 +12,14 @@
 #include <netinet/in.h>
 #include <sys/time.h>
 #include <fcntl.h>
+#include "config.h"
 #include "arena.h"
-#include "protocol.h"
 
 #ifdef ALLOC_FUNC
 #define MMALLOC(size) ALLOC_FUNC(size)
 #else
 #define MMALLOC(size) malloc(size)
 #endif
-
-#define TRUE 1
-#define FALSE 0
-
-typedef enum {
-    CONNECTION_CLIENT,
-    CONNECTION_SERVER,
-} ConnectionMode;
-
-typedef struct ConnectionOpts_st {
-    ConnectionMode mode;
-    int port;
-    int16_t buffer_size;
-    int16_t max_clients;
-    int16_t max_pending_conn;
-    int client_timeout_ms;
-    int receive_timeout_secs;
-} ConnectionOpts;
 
 typedef struct Connection_st {
     int socket;
@@ -64,17 +46,17 @@ socket_send(int socket, char* buf, int size) {
     return sent;
 }
 
-/* int */
-/* socket_read(int socket, char* buf, int size) { */
-/*     int readc = 0; */
-/*     while (readc < size) { */
-/*         char* ptr = &buf[readc]; */
-/*         int r = read(socket, ptr, size - readc); */
-/*         if (r < 1) break; */
-/*         readc += r; */
-/*     } */
-/*     return readc; */
-/* } */
+int
+socket_read(int socket, char* buf, int size) {
+    int readc = 0;
+    while (readc < size) {
+        char* ptr = &buf[readc];
+        int r = read(socket, ptr, size - readc);
+        if (r < 1) break;
+        readc += r;
+    }
+    return readc;
+}
 
 int
 socket_set_nonblock(int sock) {
@@ -94,14 +76,14 @@ socket_set_timeout(int sock, int timeout_flag, int timeout_secs) {
 }
 
 int
-connection_init(ConnectionOpts* opts, Connection* conn_ptr) {
-    int opt = TRUE;
+connection_init(Config* config, Connection* conn_ptr) {
+    int opt = 1;
     *conn_ptr = (Connection){
         .socket = socket(AF_INET, SOCK_STREAM, 0),
         .address = {
             .sin_family = AF_INET,
             .sin_addr.s_addr = INADDR_ANY,
-            .sin_port = htons(opts->port),
+            .sin_port = htons(config->args.port),
         },
         .in_buf = 0,
         .out_buf = 0,
@@ -112,9 +94,9 @@ connection_init(ConnectionOpts* opts, Connection* conn_ptr) {
         return conn_ptr->socket;
     }
 
-    conn_ptr->in_buf = MMALLOC(sizeof(char) * opts->buffer_size);
+    conn_ptr->in_buf = MMALLOC(sizeof(char) * config->settings.connection.buffer_size);
     if (!conn_ptr->in_buf) return -1;
-    conn_ptr->out_buf = MMALLOC(sizeof(char) * opts->buffer_size);
+    conn_ptr->out_buf = MMALLOC(sizeof(char) * config->settings.connection.buffer_size);
     if (!conn_ptr->in_buf) return -1;
 
     // Set socket to reuse address
@@ -124,15 +106,15 @@ connection_init(ConnectionOpts* opts, Connection* conn_ptr) {
     }
 
     // Set socket read & write timeouts
-    if (socket_set_timeout(conn_ptr->socket, SO_RCVTIMEO, opts->receive_timeout_secs) != 0 ||
-        socket_set_timeout(conn_ptr->socket, SO_SNDTIMEO, opts->receive_timeout_secs) != 0)
+    if (socket_set_timeout(conn_ptr->socket, SO_RCVTIMEO, config->settings.connection.sock_timeout_sec) != 0 ||
+        socket_set_timeout(conn_ptr->socket, SO_SNDTIMEO, config->settings.connection.sock_timeout_sec) != 0)
     {
         perror("Failed to set socket timeout options");
         return -1;
     }
 
     socklen_t addrlen = sizeof(conn_ptr->address);
-    if (opts->mode == CONNECTION_SERVER) {
+    if (config->args.run_mode == RUNMODE_SERVER) {
         // Bind socket
         if (bind(conn_ptr->socket, (struct sockaddr*)&conn_ptr->address, addrlen) < 0) {
             perror("Unable to bind socket");
@@ -140,13 +122,13 @@ connection_init(ConnectionOpts* opts, Connection* conn_ptr) {
         }
 
         // Listen to socket
-        if (listen(conn_ptr->socket, opts->max_pending_conn) < 0) {
+        if (listen(conn_ptr->socket, config->settings.connection.max_pending_conn) < 0) {
             perror("Unable to listen to socket");
             return -1;
         }
 
 #ifdef NETWORK_DEBUG
-        printf("Socket listening on port %i\n", opts->port);
+        printf("Socket listening on port %i\n", config->args.port);
 #endif
     }
     else {
@@ -155,7 +137,7 @@ connection_init(ConnectionOpts* opts, Connection* conn_ptr) {
             return -1;
         }
 #ifdef NETWORK_DEBUG
-        printf("Socket connected to port %i\n", opts->port);
+        printf("Socket connected to port %i\n", config->args.port);
 #endif
     }
 
@@ -172,7 +154,7 @@ connection_close(Connection* conn) {
 }
 
 void
-connection_init_set(Connection* conn, ConnectionOpts* opts) {
+connection_init_set(Connection* conn, Config* config) {
     // Clear the descriptor sets
     FD_ZERO(&conn->read_flags);
     FD_ZERO(&conn->write_flags);
@@ -181,70 +163,8 @@ connection_init_set(Connection* conn, ConnectionOpts* opts) {
     FD_SET(conn->socket, &conn->read_flags);
     FD_SET(conn->socket, &conn->write_flags);
 
-    memset(conn->in_buf, 0, opts->buffer_size);
-    memset(conn->out_buf, 0, opts->buffer_size);
-}
-
-/***************************************************************
- * Network Message
- **************************************************************/
-
-int
-netmsg_send(int socket, char* data_buf, int buf_len, ProtocolTokenStream* token_stream) {
-    int length = protocol_tokenstream_to_buf(token_stream, data_buf, buf_len, sizeof(int));
-    if (length < 1) {
-        fprintf(stderr, "Failed to serialize protocol token stream into a buffer\n");
-        return -1;
-    }
-
-    length += sizeof(int);
-    *((int*)data_buf) = length;
-
-    return send(socket, data_buf, length, 0);
-}
-
-int
-netmsg_broadcast(int* sockets,
-                 int socket_count,
-                 int ignore_sock,
-                 char* data_buf,
-                 int buf_len,
-                 ProtocolTokenStream* token_stream)
-{
-    int length = protocol_tokenstream_to_buf(token_stream, data_buf, buf_len, sizeof(int));
-    if (length < 1) {
-        fprintf(stderr, "Failed to serialize protocol token stream into a buffer\n");
-        return -1;
-    }
-
-    length += sizeof(int);
-    *((int*)data_buf) = length;
-
-    for (int i = 0; i < socket_count; i++) {
-        int c_sock = sockets[i];
-        if (c_sock > 0 && c_sock != ignore_sock) {
-            if (send(c_sock, data_buf, length, MSG_NOSIGNAL) < 1) {
-                fprintf(stderr, "Failed to broadcast message to socket %d\n", c_sock);
-            }
-        }
-    }
-
-    return 0;
-}
-
-int
-netmsg_read(char* data_buf, int buf_len, ProtocolTokenStream* token_stream) {
-    int msg_len = *((int*)data_buf);
-    if (protocol_buf_to_tokenstream(data_buf,
-                                    msg_len - sizeof(int),
-                                    sizeof(int),
-                                    token_stream) != 0)
-    {
-        fprintf(stderr, "Failed to deserialize buffer into a protocol token stream\n");
-        return -1;
-    }
-
-    return 0;
+    memset(conn->in_buf, 0, config->settings.connection.buffer_size);
+    memset(conn->out_buf, 0, config->settings.connection.buffer_size);
 }
 
 #endif

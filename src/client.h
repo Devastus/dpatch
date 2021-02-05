@@ -2,10 +2,11 @@
 #define DPATCH_CLIENT_H
 
 #include <errno.h>
-#include "protocol.h"
+#include "config.h"
 #include "net.h"
+#include "protocol.h"
 
-#define PROTOCOL_TOKEN_COUNT 30
+#define CLIENT_PRINT(config, fd, fmt, ...) if (!config->args.quiet) fprintf(fd, fmt, ##__VA_ARGS__)
 
 static inline int
 is_cmd(char* cmd, char** cmd_set, int cmd_set_count) {
@@ -15,62 +16,47 @@ is_cmd(char* cmd, char** cmd_set, int cmd_set_count) {
     return 0;
 }
 
-static inline int
-client_check_activity(Connection* conn, ConnectionOpts* opts) {
-    struct timeval waitd = {0, 66666}; // 15fps
-    return select(conn->socket + 1, &conn->read_flags, NULL, NULL, &waitd);
-}
-
-static int
-client_eval_packet(Connection* conn, ConnectionOpts* opts, ProtocolTokenStream* token_stream) {
-    for (int i = 0; i < token_stream->length; i++) {
-        ProtocolToken token = token_stream->tokens[i];
-        switch(token_stream->type) {
-            case PROTOCOL_MSG_PRINT_OUT:
-            case PROTOCOL_MSG_TASK_COMPLETE:
-                fprintf(stdout, "%s", token.value);
-                break;
-            case PROTOCOL_MSG_PRINT_ERR:
-                fprintf(stderr, "%s", token.value);
-                break;
-            default:
-                break;
-        }
-    }
-    return 0;
-}
-
 static int
 client_eval_cmds(char** argv,
-                 int* cmd_indices,
-                 int cmd_count,
+                 Config* config,
                  ProtocolTokenStream* msg)
 {
-    if (cmd_count < 1) return -1;
+    if (config->args.arg_count < 1) return -1;
 
     msg->type = -1;
     for (int i = 0; i < 2; i++) {
-        char* cmd = argv[cmd_indices[i]];
-        if (is_cmd(cmd, (char*[]){"task", "t"}, 2)) {
-            msg->type = PROTOCOL_MSG_TASK_INVOKE;
+        char* cmd = argv[config->args.arg_indices[i]];
+        if (is_cmd(cmd, (char*[]){"run", "r"}, 2)) {
+            msg->type = PROTOCOL_MSG_TASK_RUN;
+        }
+        else if (is_cmd(cmd, (char*[]){"set", "s"}, 2)) {
+            msg->type = PROTOCOL_MSG_WORKSPACE_SET;
         }
         else if (is_cmd(cmd, (char*[]){"workspace", "ws", "w"}, 3)) {
-            msg->type = PROTOCOL_MSG_WORKSPACE_USE;
+            msg->type = PROTOCOL_MSG_WORKSPACE_INFO;
+            CLIENT_PRINT(config, stderr, "Workspace info command is not implemented yet\n");
+            return -1;
         }
-        else if (is_cmd(cmd, (char*[]){"get", "g"}, 2)) {
-            msg->type = cmd_count > 1 ?
-                        PROTOCOL_MSG_TASK_GET :
-                        PROTOCOL_MSG_WORKSPACE_GET;
-            fprintf(stderr, "Get is not implemented yet\n");
+        else if (is_cmd(cmd, (char*[]){"task", "t"}, 2)) {
+            msg->type = PROTOCOL_MSG_TASK_INFO;
+            CLIENT_PRINT(config, stderr, "Task info command is not implemented yet\n");
+            return -1;
+        }
+        else if (is_cmd(cmd, (char*[]){"process", "proc", "p"}, 3)) {
+            msg->type = PROTOCOL_MSG_PROC_INFO;
+            CLIENT_PRINT(config, stderr, "Process info command is not implemented yet\n");
             return -1;
         }
     }
-    if (msg->type < 0) return -1;
+    if (msg->type < 0) {
+        CLIENT_PRINT(config, stderr, "Invalid command received\n");
+        return -1;
+    }
 
-    msg->length = cmd_count - 1;
+    msg->length = config->args.arg_count - 1;
 
-    for (int i = 1; i < cmd_count; i++) {
-        char* cmd = argv[cmd_indices[i]];
+    for (int i = 1; i < config->args.arg_count; i++) {
+        char* cmd = argv[config->args.arg_indices[i]];
         if(cmd == NULL) break;
 
         ProtocolTokenType type = PROTOCOL_TOKEN_NONE;
@@ -79,7 +65,7 @@ client_eval_cmds(char** argv,
         if (strcmp(cmd, "-e") == 0) {
             type = PROTOCOL_TOKEN_VAR;
             i++;
-            cmd = argv[cmd_indices[i]];
+            cmd = argv[config->args.arg_indices[i]];
         }
         // Argument
         else {
@@ -93,106 +79,65 @@ client_eval_cmds(char** argv,
 }
 
 /*****************************************************
- * RUN LOOP(S)
+ * RUN LOOP
  ****************************************************/
 
 int
-run_cmd(ConnectionOpts* opts, char** argv, int* cmd_indices, int cmd_count) {
-    ProtocolTokenStream* token_stream = protocol_tokenstream_alloc(PROTOCOL_TOKEN_COUNT);
+run_cmd(Config* config, char** argv) {
+    ProtocolTokenStream* token_stream = protocol_tokenstream_alloc(config->settings.general.protocol_token_count);
     if (!token_stream) {
-        fprintf(stderr, "Unable to allocate protocol token stream\n");
+        CLIENT_PRINT(config, stderr, "Unable to allocate protocol token stream\n");
         return -1;
     }
 
-    if (client_eval_cmds(argv, cmd_indices, cmd_count, token_stream) < 0) {
-        fprintf(stderr, "Invalid command received.\n");
+    if (client_eval_cmds(argv, config, token_stream) < 0) {
         return -1;
     }
 
     Connection conn;
-    if (connection_init(opts, &conn) < 1) {
+    if (connection_init(config, &conn) < 1) {
         return -1;
     }
 
-    fprintf(stdout, "Sending command to dpatch server at port %d...\n", opts->port);
+    CLIENT_PRINT(config, stdout, "Sending command to dpatch server at port %d...\n", config->args.port);
 
-    if (netmsg_send(conn.socket, conn.out_buf, opts->buffer_size, token_stream) < 1) {
-        fprintf(stderr, "Unable to send network message.\n");
+    if (protocol_send(conn.socket, conn.out_buf, config->settings.connection.buffer_size, token_stream) < 1) {
+        CLIENT_PRINT(config, stderr, "Unable to send network message.\n");
         return -1;
     }
 
-    fprintf(stdout, "Command sent succesfully.\n");
     // Expect response from server
-    /* struct pollfd fd; */
-    /* fd.fd        = conn.socket; */
-    /* fd.events    = POLLIN; */
-    /* int poll_ret = poll(&fd, 1, opts->client_timeout_ms); */
+    struct pollfd fd;
+    fd.fd        = conn.socket;
+    fd.events    = POLLIN;
+    int poll_ret = poll(&fd, 1, config->settings.connection.client_timeout_ms);
 
-    /* if (poll_ret > 0) { */
-    /*     int value_read = read(conn.socket, conn.in_buf, opts->buffer_size); */
-    /*     if (value_read > 0) { */
-    /*         if (netmsg_read(conn.in_buf, opts->buffer_size, token_stream) != 0) { */
-    /*             fprintf(stderr, "Received an invalid message from server.\n"); */
-    /*         } */
-    /*         else { */
-    /*             switch (token_stream->type) { */
-    /*                 case PROTOCOL_MSG_PRINT_ERR: */
-    /*                     fprintf(stderr, "Error sending command: %s\n", token_stream->tokens[0].value); */
-    /*                     break; */
-    /*                 default: */
-    /*                     fprintf(stdout, "Command sent succesfully.\n"); */
-    /*                     break; */
-    /*             } */
-    /*         } */
-    /*     } */
-    /* } */
-    /* else { */
-    /*     fprintf(stderr, "Connection timeout after %ims\n", opts->client_timeout_ms); */
-    /* } */
-
-    connection_close(&conn);
-    return 0;
-}
-
-int
-run_as_monitor(ConnectionOpts* opts) {
-    ProtocolTokenStream* token_stream = protocol_tokenstream_alloc(10);
-    if (!token_stream) {
-        fprintf(stderr, "Unable to allocate protocol token stream\n");
-        return -1;
-    }
-
-    Connection conn;
-    if (connection_init(opts, &conn) < 1) {
-        fprintf(stderr, "Unable to initialize connection\n");
-        return -1;
-    }
-
-    fprintf(stdout, "dpatch monitor connected to server at port %d\n", opts->port);
-    char running = 1;
-    while (running > 0) {
-        connection_init_set(&conn, opts);
-        FD_SET(STDIN_FILENO, &conn.read_flags);
-        client_check_activity(&conn, opts);
-
-        // Read from socket
-        if (FD_ISSET(conn.socket, &conn.read_flags)) {
-            int value_read = read(conn.socket, conn.in_buf, opts->buffer_size);
-            if (value_read > 0) {
-                if (netmsg_read(conn.in_buf, value_read, token_stream) != 0) {
-                    fprintf(stderr, "Received an invalid message from server\n");
-                } else {
-                    client_eval_packet(&conn, opts, token_stream);
-                }
+    if (poll_ret > 0) {
+        int value_read = read(conn.socket, conn.in_buf, config->settings.connection.buffer_size);
+        if (value_read > 0) {
+            if (protocol_read(conn.in_buf, config->settings.connection.buffer_size, token_stream) != 0) {
+                CLIENT_PRINT(config, stderr, "Received an invalid message from server.\n");
             }
-            else if (value_read == 0) {
-                fprintf(stdout, "Connection closed by the server\n");
-                connection_close(&conn);
-                break;
+            else {
+                FILE* fd;
+                char* fmt;
+                if (token_stream->type == PROTOCOL_MSG_ERR) {
+                    fd = stderr;
+                    fmt = "Error: %s\n";
+                }
+                else {
+                    fd = stdout;
+                    fmt = "Success: %s\n";
+                }
+                CLIENT_PRINT(config, fd, fmt, token_stream->tokens[0].value);
             }
         }
     }
+    else {
+        CLIENT_PRINT(config, stderr, "Connection timeout after %ims\n", config->settings.connection.client_timeout_ms);
+    }
 
+    connection_close(&conn);
     return 0;
 }
 

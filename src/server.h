@@ -6,8 +6,6 @@
 #include <wait.h>
 #include <time.h>
 #include "arena.h"
-#define PROTOCOL_IMPL
-#include "protocol.h"
 #include "net.h"
 #define STORE_IMPL
 #include "store.h"
@@ -15,42 +13,17 @@
 #include "stack.h"
 #define INI_IMPL
 #include "ini.h"
+#define PROTOCOL_IMPL
+#include "protocol.h"
+#include "log.h"
 
-#define PROCESS_STACK_COUNT 5
-#define TASK_STACK_COUNT 5
-#define CMD_BINPATH "/bin/sh"
-#define PROTOCOL_TOKEN_COUNT 30
-#define TASK_BUF_SIZE 8192
-#define TASK_VAR_COUNT 30
-#define TASK_NAME_SIZE 128
+#define FMT_SERVER(fmt, ...) "[server] " fmt, ##__VA_ARGS__
+#define FMT_TARGET(target, fmt, ...) "[%s] " fmt, target, ##__VA_ARGS__
 
-#ifdef SERVER_DEBUG
-#define DEBUG_PRINT(fmt, ...) (printf(fmt, ##__VA_ARGS__))
-#else
-#define DEBUG_PRINT(fmt, ...)
-#endif
-
-#define CREATE_MSG_FMT(buf, size, time, target, msg) {\
-    snprintf(buf, size, "(%s) [%s] %s", time, target, msg);\
-}
-
-#define CREATE_MSG_ARGS(buf, size, time, target, fmt, ...) {\
-    int msg_size = size - 30;\
-    char msg_buf[msg_size];\
-    snprintf(msg_buf, msg_size, fmt, ##__VA_ARGS__);\
-    CREATE_MSG_FMT(buf, size, t_buf, target, msg_buf);\
-}
-
-#define CREATE_MSG_AUTOTIMED(buf, size, target, fmt, ...) {\
-    time_t t = time(0);\
-    char t_buf[30];\
-    strftime(t_buf, 30, "%d/%m/%Y %H:%M:%S", localtime(&t));\
-    CREATE_MSG_ARGS(buf, size, t_buf, target, fmt, ##__VA_ARGS__);\
-}
-
-#define SERVER_PRINT_BROADCAST(server, ptype, buf, size) {\
-    printf("%s", buf);\
-    server_broadcast(server, 0, ptype, buf, size);\
+#define SERVER_RESPOND_FMT(server, config, packet, type, fmt, ...) {\
+    char buf[config->settings.connection.buffer_size];\
+    snprintf(buf, config->settings.connection.buffer_size, fmt, ##__VA_ARGS__);\
+    server_respond(server, config, packet, type, buf);\
 }
 
 typedef struct Task_st {
@@ -97,50 +70,35 @@ typedef struct Server_st {
 
 static int
 server_send(Server* server,
-            ConnectionOpts* opts,
+            Config* config,
             int client_sock,
             ProtocolMsgType type,
             char* buf)
 {
     server->token_stream->type = type;
-    protocol_tokenstream_reset(server->token_stream, PROTOCOL_TOKEN_COUNT);
+    protocol_tokenstream_reset(server->token_stream);
     protocol_tokenstream_add_token(server->token_stream, PROTOCOL_TOKEN_ARG, buf);
-    return netmsg_send(client_sock, server->conn.out_buf, opts->buffer_size, server->token_stream);
+    return protocol_send(client_sock,
+                         server->conn.out_buf,
+                         config->settings.connection.buffer_size,
+                         server->token_stream);
 }
 
 static int
-server_broadcast(Server* server,
-                 int ignore_sock,
-                 ProtocolMsgType type,
-                 char* buf,
-                 int buffer_size)
+server_respond(Server* server,
+               Config* config,
+               ClientPacket* packet,
+               ProtocolMsgType msg_type,
+               char* msg)
 {
-    server->token_stream->type = type;
-    protocol_tokenstream_reset(server->token_stream, PROTOCOL_TOKEN_COUNT);
-    protocol_tokenstream_add_token(server->token_stream, PROTOCOL_TOKEN_ARG, buf);
-    return netmsg_broadcast(server->client_stack->data,
-                            server->client_stack->count,
-                            ignore_sock,
-                            server->conn.out_buf,
-                            buffer_size,
-                            server->token_stream);
-}
-
-static int
-server_ack_close(Server* server,
-           ConnectionOpts* opts,
-           ClientPacket* packet)
-{
-    /* int sent = server_send(server, opts, packet->socket, PROTOCOL_MSG_ACK, ""); */
+    int sent = server_send(server, config, packet->socket, msg_type, msg);
     close(packet->socket);
     stack_remove_at_fast(server->client_stack, packet->client);
-
-    /* if (sent < 1) { */
-    /*     fprintf(stderr, "Failed to send acknowledgement message back to client '%d'\n", packet->socket); */
-    /*     return -1; */
-    /* } */
-    /* return sent; */
-    return 1;
+    if (sent < 1) {
+        LOG_WARN(FMT_SERVER("Failed to send response to socket '%d'", packet->socket));
+        return -1;
+    }
+    return sent;
 }
 
 /*****************************************************
@@ -198,32 +156,32 @@ get_from_ws(Server* server, IniHandler handler, void* data) {
 }
 
 static inline KeyValue
-get_task(Server* server, char* task_name, char** envs) {
+get_task(Server* server, Config* config, char* task_name, char** envs) {
     if (!task_name) return KEYVALUE_NONE;
 
     // Allocate new Task into task stack
     KeyValue res = store_push_empty(server->task_store);
     if (!res.value) {
-        fprintf(stderr, "Task store capacity reached\n");
+        LOG_WARN(FMT_SERVER("Task store capacity reached"));
         return KEYVALUE_NONE;
     }
     Task* new_task = res.value;
 
     new_task->buf_loc = 0;
     new_task->buf     = (char*)new_task + sizeof(Task);
-    new_task->vars    = (char**)(new_task->buf + TASK_BUF_SIZE);
+    new_task->vars    = (char**)(new_task->buf + config->settings.general.task_buf_size);
     new_task->name    = task_write(new_task, task_name, '\0');
 
     // Try parse Task data from active workspace INI file, remove from task stack if parse fails
     if (get_from_ws(server, workspace_task_get, new_task) != 0) {
-        fprintf(stderr, "Task '%s' does not exist\n", task_name);
+        LOG_WARN(FMT_SERVER("Task '%s' does not exist", task_name));
         store_remove_at(server->task_store, res.key);
         return KEYVALUE_NONE;
     }
 
     // If task has no cmd, it cannot be executed
     if (!new_task->cmd) {
-        fprintf(stderr, "Task '%s' is invalid: missing 'cmd' value\n", task_name);
+        LOG_WARN(FMT_SERVER("Task '%s' is invalid: missing 'cmd' value", task_name));
         store_remove_at(server->task_store, res.key);
         return KEYVALUE_NONE;
     }
@@ -243,13 +201,13 @@ get_task(Server* server, char* task_name, char** envs) {
 }
 
 static int
-server_task_launch(Server* server, Task* new_task) {
+server_task_launch(Server* server, Config* config, Task* new_task) {
     if (!new_task) {
-        fprintf(stderr, "Task is NULL\n");
         return -1;
-    };
+    }
+
     if (server->process_store->open_cnt < 1) {
-        fprintf(stderr, "Process store capacity reached\n");
+        LOG_WARN(FMT_SERVER("Process store capacity reached"));
         return -1;
     }
 
@@ -280,7 +238,7 @@ server_task_launch(Server* server, Task* new_task) {
         if (dup2(out_fd[1], STDOUT_FILENO) < 0) { perror("Failed to redirect STDOUT to pipe"); exit(errno); }
         if (dup2(err_fd[1], STDERR_FILENO) < 0) { perror("Failed to redirect STDERR to pipe"); exit(errno); }
 
-        char* args[] = { CMD_BINPATH, "-c", new_task->cmd, NULL };
+        char* args[] = { config->settings.general.cmd_bin_path, "-c", new_task->cmd, NULL };
         if (new_task->dir != NULL) {
             if (chdir(new_task->dir) != 0) {
                 perror("Failed to change working directory");
@@ -288,7 +246,7 @@ server_task_launch(Server* server, Task* new_task) {
             }
         }
 
-        if (execve(CMD_BINPATH, args, new_task->vars) != 0) {
+        if (execve(config->settings.general.cmd_bin_path, args, new_task->vars) != 0) {
             perror("Failed to execute command");
         }
 
@@ -298,12 +256,12 @@ server_task_launch(Server* server, Task* new_task) {
     }
     // Parent
     else {
-        DEBUG_PRINT("Parent pid: %d, child pid: %d\n", getpid(), child_pid);
+        LOG_DEBUG("Parent pid: %d, child pid: %d", getpid(), child_pid);
 
         // Push a new task process to store
         KeyValue res = store_push_empty(server->process_store);
         if (!res.value) {
-            fprintf(stderr, "Failed to push new process to the process store\n");
+            LOG_WARN(FMT_SERVER("Failed to push new process to the process store"));
             return -1;
         }
 
@@ -335,7 +293,7 @@ server_task_wait_match(Server* server, Task* task) {
 }
 
 static int
-server_check_task_queue(Server* server, char* completed_task_name, int name_len) {
+server_check_task_queue(Server* server, Config* config, char* completed_task_name, int name_len) {
     if (server->process_store->open_cnt < 1) {
         return -1;
     }
@@ -345,18 +303,16 @@ server_check_task_queue(Server* server, char* completed_task_name, int name_len)
         if (!res.value) continue;
         Task* task = res.value;
 
-        DEBUG_PRINT("task name: %s, task wait: %s\n", task->name, task->wait);
+        LOG_DEBUG(FMT_SERVER("Task name: %s, task wait: %s", task->name, task->wait));
 
         if (task->wait == NULL || strncmp(task->wait, completed_task_name, name_len) == 0) {
-            int status = server_task_launch(server, task);
+            int status = server_task_launch(server, config, task);
             if (status != 0) {
-                fprintf(stderr, "Failed to launch task '%s'\n", task->name);
+                LOG_WARN(FMT_SERVER("Failed to launch task '%s'", task->name));
                 return -1;
             }
             else {
-                char buf[256];
-                CREATE_MSG_AUTOTIMED(buf, 256, "server", "Launching task '%s'\n", task->name);
-                SERVER_PRINT_BROADCAST(server, PROTOCOL_MSG_PRINT_OUT, buf, 256);
+                LOG_INFO(FMT_SERVER("Launching task '%s'", task->name));
                 store_remove_at(server->task_store, res.key);
             }
             return 0;
@@ -367,9 +323,10 @@ server_check_task_queue(Server* server, char* completed_task_name, int name_len)
 }
 
 static int
-server_eval_packet(ConnectionOpts* opts, Server* server, ClientPacket* packet) {
-    if (netmsg_read(packet->data, opts->buffer_size, server->token_stream) != 0) {
-        fprintf(stderr, "Received an invalid message from client\n");
+server_eval_packet(Config* config, Server* server, ClientPacket* packet) {
+    if (protocol_read(packet->data, config->settings.connection.buffer_size, server->token_stream) != 0) {
+        server_respond(server, config, packet, PROTOCOL_MSG_ERR, "Invalid command");
+        LOG_WARN(FMT_SERVER("Received an invalid message from client"));
         return -1;
     }
 
@@ -377,38 +334,36 @@ server_eval_packet(ConnectionOpts* opts, Server* server, ClientPacket* packet) {
     char* args[server->token_stream->length];
     char* vars[server->token_stream->length];
     if (protocol_parse_token_stream(server->token_stream, &type, args, vars) != 0) {
-        fprintf(stderr, "Failed to parse tokens from message\n");
+        server_respond(server, config, packet, PROTOCOL_MSG_ERR, "Invalid command");
+        LOG_WARN(FMT_SERVER("Failed to parse tokens from client message"));
         return -1;
     }
 
     switch (server->token_stream->type) {
-        case PROTOCOL_MSG_TASK_INVOKE: {
-            if (server_ack_close(server, opts, packet) < 1) {
-                fprintf(stderr, "Failed to send acknowlegde message to socket '%d'\n", packet->socket);
-                return -1;
-            }
-
-            KeyValue res = get_task(server, args[0], vars);
+        case PROTOCOL_MSG_TASK_RUN: {
+            KeyValue res = get_task(server, config, args[0], vars);
             if (!res.value) {
+                SERVER_RESPOND_FMT(server, config, packet, PROTOCOL_MSG_ERR, "Task '%s' not found", args[0]);
+                LOG_WARN(FMT_SERVER("Failed to find requested task '%s'", args[0]));
                 return -1;
             }
 
             Task* new_task = res.value;
-            char buf[256];
             if (server_task_wait_match(server, new_task)) {
-                CREATE_MSG_AUTOTIMED(buf, 256, "server", "Queuing task '%s'\n", args[0]);
-                SERVER_PRINT_BROADCAST(server, PROTOCOL_MSG_PRINT_OUT, buf, 256);
+                SERVER_RESPOND_FMT(server, config, packet, PROTOCOL_MSG_SUCCESS, "Task '%s' put in queue", args[0]);
+                LOG_INFO(FMT_SERVER("Queuing task '%s'", args[0]));
             }
             else {
-                int launch_status = server_task_launch(server, new_task);
+                int launch_status = server_task_launch(server, config, new_task);
 
                 if (launch_status != 0) {
-                    fprintf(stderr, "Failed to launch task '%s'\n", args[0]);
+                    SERVER_RESPOND_FMT(server, config, packet, PROTOCOL_MSG_ERR, "Failed to run task '%s'", args[0]);
+                    LOG_WARN(FMT_SERVER("Failed to start task '%s'", args[0]));
                     return -1;
                 }
                 else {
-                    CREATE_MSG_AUTOTIMED(buf, 256, "server", "Launching task '%s'\n", args[0]);
-                    SERVER_PRINT_BROADCAST(server, PROTOCOL_MSG_PRINT_OUT, buf, 256);
+                    SERVER_RESPOND_FMT(server, config, packet, PROTOCOL_MSG_SUCCESS, "Task '%s' started succesfully", args[0]);
+                    LOG_INFO(FMT_SERVER("Starting task '%s'", args[0]));
                     store_remove_at(server->task_store, res.key);
                 }
             }
@@ -416,34 +371,36 @@ server_eval_packet(ConnectionOpts* opts, Server* server, ClientPacket* packet) {
             break;
         }
 
-        // TODO: Get workspace info
-        /* case PROTOCOL_MSG_WORKSPACE_GET: { */
-            /* server_acknowledge(conn, packet); */
-            /* break; */
-        /* } */
-
-        case PROTOCOL_MSG_WORKSPACE_USE: {
-            if (server_ack_close(server, opts, packet) < 1) {
-                fprintf(stderr, "Failed to send acknowlegde message to socket '%d'\n", packet->socket);
-                return -1;
-            }
-
+        case PROTOCOL_MSG_WORKSPACE_SET: {
             if (access(args[0], R_OK) != 0) {
+                server_respond(server, config, packet, PROTOCOL_MSG_ERR, "Workspace not found");
+                LOG_WARN(FMT_SERVER("Failed to set active workspace as '%s'", args[0]));
                 return -1;
             }
 
             strcpy(server->workspace, args[0]);
-            char buf[256];
-            CREATE_MSG_AUTOTIMED(buf, 256, "server", "Using workspace '%s'\n", args[0]);
-            SERVER_PRINT_BROADCAST(server, PROTOCOL_MSG_PRINT_OUT, buf, 256);
+            SERVER_RESPOND_FMT(server, config, packet, PROTOCOL_MSG_SUCCESS, "Workspace '%s' set as active", args[0]);
+            LOG_INFO(FMT_SERVER("Using workspace '%s'", args[0]));
             break;
         }
 
+        // TODO: Get task info
+        /* case PROTOCOL_MSG_TASK_INFO: { */
+            /* break; */
+        /* } */
+
+        // TODO: Get workspace info
+        /* case PROTOCOL_MSG_WORKSPACE_INFO: { */
+            /* break; */
+        /* } */
+
+        // TODO: Get process info
+        /* case PROTOCOL_MSG_PROC_INFO: { */
+            /* break; */
+        /* } */
+
         default:
-            if (server_ack_close(server, opts, packet) < 1) {
-                fprintf(stderr, "Failed to send acknowlegde message to socket '%d'\n", packet->socket);
-                return -1;
-            }
+            server_respond(server, config, packet, PROTOCOL_MSG_ERR, "Invalid command");
             break;
     }
     return 0;
@@ -464,7 +421,7 @@ server_cleanup(Server* server) {
 }
 
 static int
-server_check_activity(Server* server, ConnectionOpts* opts) {
+server_check_activity(Server* server, Config* config) {
     int max_sock_desc = server->conn.socket;
 
     // Add client sockets to descriptor set
@@ -484,12 +441,13 @@ server_check_activity(Server* server, ConnectionOpts* opts) {
     }
 
     // Poll for file descriptor changes
-    struct timeval waitd = {0, 66666}; // 15fps
+    struct timeval waitd = {config->settings.connection.select_timeout_sec,
+                            config->settings.connection.select_timeout_usec}; // 15fps
     return select(max_sock_desc + 1, &server->conn.read_flags, NULL, NULL, &waitd);
 }
 
 static int
-server_handle_incoming(Connection* conn, ConnectionOpts* opts, Stack* client_stack) {
+server_handle_incoming(Connection* conn, Config* config, Stack* client_stack) {
     if (FD_ISSET(conn->socket, &conn->read_flags)) {
         // Try accepting a new connection from main socket
         socklen_t addr_len = 0;
@@ -500,7 +458,7 @@ server_handle_incoming(Connection* conn, ConnectionOpts* opts, Stack* client_sta
         }
 
         // If over the max client limit, instantly close the connection
-        if (client_stack->count >= opts->max_clients) {
+        if (client_stack->count >= config->settings.connection.max_clients) {
             close(new_socket);
             return 0;
         }
@@ -510,29 +468,35 @@ server_handle_incoming(Connection* conn, ConnectionOpts* opts, Stack* client_sta
             return -1;
         }
 
-        if (socket_set_timeout(new_socket, SO_RCVTIMEO, opts->receive_timeout_secs) != 0 ||
-            socket_set_timeout(new_socket, SO_SNDTIMEO, opts->receive_timeout_secs) != 0)
+        if (socket_set_timeout(new_socket, SO_RCVTIMEO, config->settings.connection.sock_timeout_sec) != 0 ||
+            socket_set_timeout(new_socket, SO_SNDTIMEO, config->settings.connection.sock_timeout_sec) != 0)
         {
             perror("Failed to set socket timeout options");
             return -1;
         }
 
         stack_push(client_stack, &new_socket);
-        DEBUG_PRINT("New connection %d\n", new_socket);
+        LOG_DEBUG(FMT_SERVER("New connection %d", new_socket));
         return 1;
     }
     return 0;
 }
 
 static void
-server_broadcast_fd(Server* server, ConnectionOpts* opts, char* process_name, ProtocolMsgType type, int fd) {
-    memset(server->conn.in_buf, 0, opts->buffer_size);
-    if (FD_ISSET(fd, &server->conn.read_flags)) {
-        int value_read = read(fd, server->conn.in_buf, opts->buffer_size);
+server_process_print(Server* server, Config* config, TaskProcess* process) {
+    memset(server->conn.in_buf, 0, config->settings.connection.buffer_size);
+    if (FD_ISSET(process->out_fd_r, &server->conn.read_flags)) {
+        int value_read = read(process->out_fd_r, server->conn.in_buf, config->settings.connection.buffer_size);
         if (value_read > 0) {
-            char buf[256];
-            CREATE_MSG_AUTOTIMED(buf, 256, process_name, "%s", server->conn.in_buf);
-            SERVER_PRINT_BROADCAST(server, type, buf, 256);
+            LOG_INFO(FMT_TARGET(process->task_name, "%s", server->conn.in_buf));
+            memset(server->conn.in_buf, 0, value_read);
+        }
+    }
+
+    if (FD_ISSET(process->err_fd_r, &server->conn.read_flags)) {
+        int value_read = read(process->err_fd_r, server->conn.in_buf, config->settings.connection.buffer_size);
+        if (value_read > 0) {
+            LOG_WARN(FMT_TARGET(process->task_name, "%s", server->conn.in_buf));
         }
     }
 }
@@ -542,49 +506,49 @@ server_broadcast_fd(Server* server, ConnectionOpts* opts, char* process_name, Pr
  ****************************************************/
 
 int
-run_as_server(ConnectionOpts* opts) {
-    // Initialize server
+run_as_server(Config* config) {
     Server server = {0};
     server.conn = (Connection){0};
-    if (connection_init(opts, &server.conn) < 1) {
-        fprintf(stderr, "Unable to initialize connection\n");
+    if (connection_init(config, &server.conn) < 1) {
+        LOG_ERR(FMT_SERVER("Unable to initialize connection"));
+        /* fprintf(stderr, "[FATAL] Unable to initialize connection\n"); */
         return -1;
     }
 
-    server.workspace     = arena_alloc(sizeof(char) * 256);
-    server.token_stream  = protocol_tokenstream_alloc(PROTOCOL_TOKEN_COUNT);
-    server.client_stack  = stack_new(opts->max_clients, sizeof(int));
-    server.process_store = store_new(PROCESS_STACK_COUNT,
+    server.workspace     = arena_alloc(sizeof(char) * config->settings.general.workspace_buf_size);
+    server.token_stream  = protocol_tokenstream_alloc(config->settings.general.protocol_token_count);
+    server.client_stack  = stack_new(config->settings.connection.max_clients, sizeof(int));
+    server.process_store = store_new(config->settings.general.process_store_count,
                                      sizeof(TaskProcess) +
-                                     sizeof(char) * TASK_NAME_SIZE);
-    server.task_store    = store_new(TASK_STACK_COUNT,
+                                     sizeof(char) * config->settings.general.task_name_size);
+    server.task_store    = store_new(config->settings.general.task_store_count,
                                      sizeof(Task) +
-                                     (sizeof(char) * TASK_BUF_SIZE) +
-                                     (sizeof(char*) * TASK_VAR_COUNT));
+                                     (sizeof(char) * config->settings.general.task_buf_size) +
+                                     (sizeof(char*) * config->settings.general.task_var_max_count));
     if (!server.workspace     ||
         !server.token_stream  ||
         !server.client_stack  ||
         !server.process_store ||
         !server.task_store)
     {
-        fprintf(stderr, "Failed to allocate server data\n");
+        LOG_ERR(FMT_SERVER("Failed to allocate server data"));
         return -1;
     }
 
-    fprintf(stdout, "dpatch server started at port %d\n", opts->port);
-    server.running = TRUE;
+    LOG_INFO(FMT_SERVER("dpatch server started at port %d", config->args.port));
+    server.running = 1;
     while(server.running) {
         // Check for any activity in sockets
-        connection_init_set(&server.conn, opts);
-        int activity = server_check_activity(&server, opts);
+        connection_init_set(&server.conn, config);
+        int activity = server_check_activity(&server, config);
         if ((activity < 0) && (errno != EINTR)) {
-            fprintf(stdout, "Error during select()\n");
+            LOG_ERR(FMT_SERVER("Unknown error during select()"));
         }
 
         // Check for incoming connections
-        int incoming = server_handle_incoming(&server.conn, opts, server.client_stack);
+        int incoming = server_handle_incoming(&server.conn, config, server.client_stack);
         if (incoming < 0) {
-            fprintf(stderr, "Error receiving an incoming connection\n");
+            LOG_WARN(FMT_SERVER("Error receiving an incoming connection"));
         }
 
         // Read from client sockets
@@ -596,7 +560,7 @@ run_as_server(ConnectionOpts* opts) {
             }
 
             if (FD_ISSET(sock_desc, &server.conn.read_flags)) {
-                int value_read = read(sock_desc, server.conn.in_buf, opts->buffer_size);
+                int value_read = read(sock_desc, server.conn.in_buf, config->settings.connection.buffer_size);
 
                 if (value_read > 0) {
                     ClientPacket packet = {
@@ -605,17 +569,17 @@ run_as_server(ConnectionOpts* opts) {
                         .len    = value_read,
                         .data   = server.conn.in_buf,
                     };
-                    server_eval_packet(opts, &server, &packet);
+                    server_eval_packet(config, &server, &packet);
                 }
                 // Connection closed
                 else if (value_read == 0) {
-                    DEBUG_PRINT("Connection closed - socket %i\n", sock_desc);
+                    LOG_DEBUG(FMT_SERVER("Connection closed - socket %i", sock_desc));
                     stack_remove_at_fast(server.client_stack, i);
                     close(sock_desc);
                 }
                 // Error
                 else {
-                    fprintf(stderr, "Error reading data from client socket '%d'", sock_desc);
+                    LOG_WARN(FMT_SERVER("Error reading data from client socket '%d'", sock_desc));
                 }
             }
         }
@@ -630,8 +594,9 @@ run_as_server(ConnectionOpts* opts) {
             int status = 0;
             pid_t w_pid = waitpid(process->pid, &status, WNOHANG | WUNTRACED);
 
+            // If we have an exit status, log it and remove the process from store
             if (w_pid != 0) {
-                DEBUG_PRINT("Completed process name: %s, pid: %d\n", process->task_name, process->pid);
+                LOG_DEBUG(FMT_SERVER("Completed process name: %s, pid: %d", process->task_name, process->pid));
 
                 int name_len = strlen(process->task_name);
                 char name_buf[name_len+1];
@@ -644,34 +609,24 @@ run_as_server(ConnectionOpts* opts) {
                 }
                 // PID returned with status
                 else if (w_pid > 0) {
-                    char t_buf[30];
                     time_t t = time(0);
-                    strftime(t_buf, 30, "%d/%m/%Y %H:%M:%S", localtime(&t));
-
                     time_t diff = t - process->start_time;
                     char diff_buf[20];
                     strftime(diff_buf, 20, "%H:%M:%S", localtime(&diff));
-
-                    char buf[256];
-                    CREATE_MSG_ARGS(buf,
-                                    256,
-                                    t_buf,
-                                    "server", "Task '%s' finished in %s with status code '%d'\n",
-                                    name_buf,
-                                    diff_buf,
-                                    WEXITSTATUS(status));
-                    SERVER_PRINT_BROADCAST(&server, PROTOCOL_MSG_TASK_COMPLETE, buf, 256);
+                    LOG_INFO(FMT_SERVER("Task '%s' finished in %s with status code '%d'",
+                                        name_buf,
+                                        diff_buf,
+                                        WEXITSTATUS(status)));
                 }
 
                 close(process->out_fd_r);
                 close(process->err_fd_r);
                 store_remove_at(server.process_store, i);
-                server_check_task_queue(&server, name_buf, name_len);
+                server_check_task_queue(&server, config, name_buf, name_len);
             }
+            // Print STDOUT & STDERR messages from running child process
             else {
-                // Read and broadcast STDOUT & STDERR messages from child process
-                server_broadcast_fd(&server, opts, process->task_name, PROTOCOL_MSG_PRINT_OUT, process->out_fd_r);
-                server_broadcast_fd(&server, opts, process->task_name, PROTOCOL_MSG_PRINT_ERR, process->err_fd_r);
+                server_process_print(&server, config, process);
             }
         }
 

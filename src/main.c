@@ -5,6 +5,7 @@
 #include "arena.h"
 #define CONFIG_IMPL
 #include "config.h"
+#include "log.h"
 #include "server.h"
 #include "client.h"
 
@@ -18,6 +19,7 @@
 
 void
 finish(int sig) {
+    log_close();
     arena_free();
     exit(sig);
 }
@@ -38,6 +40,7 @@ main(int argc, char** argv, char** envp) {
     arena_init(ALLOC_PAGE_SIZE, ALLOC_PAGE_COUNT, 1);
 
     Config* config = config_init(argc, argv);
+    log_init(config->args.log_file);
 
     if (config->args.help) {
         print_help();

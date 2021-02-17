@@ -303,7 +303,7 @@ server_check_task_queue(Server* server, Config* config, char* completed_task_nam
         if (!res.value) continue;
         Task* task = res.value;
 
-        LOG_DEBUG(FMT_SERVER("Task name: %s, task wait: %s", task->name, task->wait));
+        LOG_DEBUG("Task name: %s, task wait: %s", task->name, task->wait);
 
         if (task->wait == NULL || strncmp(task->wait, completed_task_name, name_len) == 0) {
             int status = server_task_launch(server, config, task);
@@ -476,7 +476,7 @@ server_handle_incoming(Connection* conn, Config* config, Stack* client_stack) {
         }
 
         stack_push(client_stack, &new_socket);
-        LOG_DEBUG(FMT_SERVER("New connection %d", new_socket));
+        LOG_DEBUG("New connection %d", new_socket);
         return 1;
     }
     return 0;
@@ -573,7 +573,7 @@ run_as_server(Config* config) {
                 }
                 // Connection closed
                 else if (value_read == 0) {
-                    LOG_DEBUG(FMT_SERVER("Connection closed - socket %i", sock_desc));
+                    LOG_DEBUG("Connection closed - socket %i", sock_desc);
                     stack_remove_at_fast(server.client_stack, i);
                     close(sock_desc);
                 }
@@ -596,7 +596,7 @@ run_as_server(Config* config) {
 
             // If we have an exit status, log it and remove the process from store
             if (w_pid != 0) {
-                LOG_DEBUG(FMT_SERVER("Completed process name: %s, pid: %d", process->task_name, process->pid));
+                LOG_DEBUG("Completed process name: %s, pid: %d", process->task_name, process->pid);
 
                 int name_len = strlen(process->task_name);
                 char name_buf[name_len+1];

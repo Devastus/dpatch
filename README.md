@@ -6,7 +6,6 @@ dpatch
 A task runner should not require megabytes (or even gigabytes) of memory and complicated dependencies to simply delegate scripts and other processes.
 
 ## Installation
--------
 
 `dpatch` requires GCC as its build dependency.
 
@@ -17,7 +16,6 @@ Run `make install` to build and move `dpatch` to /usr/local/bin for global usage
 Run `make uninstall` to remove `dpatch` from /usr/local/bin.
 
 ## Usage
-----
 
 ### Commands
 

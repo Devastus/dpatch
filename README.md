@@ -5,6 +5,8 @@ dpatch
 
 A task runner should not require megabytes (or even gigabytes) of memory and complicated dependencies to simply delegate scripts and other processes.
 
+**NOTE:** Very, very WIP and due for a major cleanup/refactorings as well as possible big changes.
+
 ## Installation
 
 `dpatch` requires GCC as its build dependency.

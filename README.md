@@ -3,7 +3,7 @@ dpatch
 
 `dpatch` is a minimalistic task runner / automation tool written in C. It aims to provide an easy-to-use interface with no frills attached for running, queuing and monitoring tasks both locally and remotely, and is meant to be extended with other Unix utilities.
 
-A task runner should not require megabytes (or even gigabytes) of memory and complicated dependencies to simply delegate bash scripts and other processes.
+A task runner should not require megabytes (or even gigabytes) of memory and complicated dependencies to simply delegate scripts and other processes.
 
 ## Installation
 -------
@@ -23,17 +23,19 @@ Run `make uninstall` to remove `dpatch` from /usr/local/bin.
 
 For quick help or refresher on available commands, run `dpatch -h`.
 
-`dpatch` Can run in three modes: command, server and monitor.
+`dpatch` Can run in two modes: agent and command.
 ```sh
 # Example commands to run in command mode
-dpatch workspace tests/workspace_test.ini
-dpatch task do_stuff -e VAR1=1
 
-# Example server command that will run the server at port 8080
-dpatch -s -p 8080
+# Sends a command to default port to set a workspace file to be used
+dpatch set tests/workspace_test.ini
 
-# Example monitor command that will connect to a server at port 8080
-dpatch -m -p 8080
+# Sends a command to port 8080 to run a task specified in active workspace with a variable
+dpatch -p 8080 run do_stuff -e VAR1=1 
+
+# Runs a task runner agent at port 8080
+dpatch -p 8080
+
 ```
 
 ### Workspaces

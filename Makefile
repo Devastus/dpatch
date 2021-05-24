@@ -6,7 +6,7 @@ TARGET_DIR = bin
 TESTS_DIR = tests
 
 CC = gcc
-CFLAGS = -std=c11 -Wall
+CFLAGS = -std=c99 -Wall
 LDFLAGS =
 DEFINES = -DLOG_LEVEL=3
 

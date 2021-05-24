@@ -144,6 +144,11 @@ poll_watch(Config* config, char** argv, ProtocolTokenStream* token_stream, int i
         if (poll_ret > 0) {
             int value_read = read(inotify_fd, &event_buf, INOTIFY_EVENT_BUF_SIZE);
             if (value_read > 0) {
+                /* TODO:
+                 * Check event type and create or remove watch descriptors respectively if
+                 * (IN_CREATE || IN_DELETE) && IN_ISDIR == true
+                 */
+
                 protocol_tokenstream_reset(token_stream);
                 if (client_eval_cmds(argv, config, token_stream) < 0) return -1;
 
@@ -169,6 +174,11 @@ run_cmd(Config* config, char** argv) {
 
     // Start watching path for changes and send command to server when change occurs
     if (config->args.watch_path) {
+
+        /* TODO:
+         * Recursively go through directories inside given path and apply watch to all of them.
+         */
+
         int inotify_fd = inotify_init();
         if (inotify_fd < 0) {
             perror("Error initializing inotify");

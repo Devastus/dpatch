@@ -85,6 +85,7 @@ print_help() {
             "  dpatch [-pwq] <task|t> <name>\n\tGet task info with given task name from a dpatch agent\n"
             "  dpatch [-pwq] <workspace|ws|w>\n\tGet active workspace info from a dpatch agent\n"
             "  dpatch [-pwq] <process|proc> <name>\n\tGet ongoing processes info with given task name from a dpatch agent\n"
+            "\n"
             "Options:\n"
             "  -p PORT\t\tSet the port to serve/connect to (default: 9999)\n"
             "  -f /file/path\t\tSet a file to load as workspace in agent (default: none)\n"

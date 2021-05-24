@@ -1,5 +1,5 @@
 clang
-%c -std=c11
+%c -std=c99
 %h
 -Isrc
 -Ilib
